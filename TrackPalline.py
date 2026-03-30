@@ -168,7 +168,8 @@ def load_fish_sprite():
                 
                 for y, x in zip(ys, xs):
                     b, g, r, a = img[y, x]
-                    dy = y - anchor_y_img
+                    # Capovolge verticalmente in modo che la pinna stia in alto
+                    dy = anchor_y_img - y
                     dx = x - anchor_x_img
                     FISH_PIXELS.append((dy, dx, (int(r), int(g), int(b))))
                 print(f"[INFO] Sprite caricato con successo ({len(FISH_PIXELS)} pixel, larghezza {FISH_WIDTH})")
@@ -187,13 +188,17 @@ FISH_COOLDOWN  = 2
 
 def draw_fish(matrix, anchor_x, anchor_y, body_color):
     """
-    Disegna il pesce prelevato dal PNG pixel-perfect.
-    Ignora body_color per mantenere i colori originali esatti del file.
+    Disegna il pesce dal PNG pixel-perfect.
+    Sostituisce arancione o rosso con il colore rilevato della pallina (body_color).
     """
     for dy, dx, color in FISH_PIXELS:
         r, c = anchor_y + dy, anchor_x + dx
         if 0 <= r < 32 and 0 <= c < 32:
-            matrix[r, c] = color
+            # Colori corpo originali: Arancio=(255, 126, 0), Rosso=(237, 28, 36)
+            if color == (255, 126, 0) or color == (237, 28, 36):
+                matrix[r, c] = body_color
+            else:
+                matrix[r, c] = color
 
 # ============================================================
 # TRACKER  (KALMAN + HUNGARIAN)
