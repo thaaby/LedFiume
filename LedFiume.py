@@ -200,20 +200,29 @@ def create_arduino_serial():
         return None
 
 
-MAGIC_HEADER = bytes([0xFF, 0x4C, 0x45])
+MAGIC_HEADER  = bytes([0xFF, 0x4C, 0x45])
+_serial_busy  = False   # True dopo aver inviato, attendiamo ACK prima del prossimo invio
 
 def send_matrix_state(ser, matrix_rgb):
-    """Invia ogni frame senza handshake bloccante: svuota il buffer RX in modo
-    non-bloccante, poi trasmette sempre il frame corrente.
-    Questo garantisce fluidità costante indipendentemente dalla latenza Arduino."""
+    """Invio non-bloccante con handshake leggero.
+    - Ogni volta controlla se Arduino ha risposto (byte 'K' nel buffer RX).
+    - Solo se libero, invia il prossimo frame.
+    - Non blocca MAI il loop principale: se Arduino è ancora occupato, si salta
+      il frame seriale (l'animazione continua comunque a scorrere a 30fps)."""
+    global _serial_busy
     if ser is None:
         return
-    # Svuota silenziosamente eventuali dati in arrivo (evita accumulo buffer)
+    # Controlla risposta Arduino (non bloccante)
     if ser.in_waiting > 0:
-        ser.read_all()
+        resp = ser.read_all()
+        if b'K' in resp or b'O' in resp:   # 'K' o 'OK' comuni nei firmware
+            _serial_busy = False
+    if _serial_busy:
+        return   # Arduino ancora impegnato → saltiamo questo invio
     rgb_gamma     = gamma_table[matrix_rgb]
     mapped_pixels = rgb_gamma[LED_MAP_Y, LED_MAP_X]
     ser.write(MAGIC_HEADER + mapped_pixels.tobytes())
+    _serial_busy  = True
 
 
 # ============================================================
