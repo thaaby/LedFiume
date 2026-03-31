@@ -25,11 +25,11 @@ ARDUINO_ENABLED            = True
 ARDUINO_PORT               = "auto"
 ARDUINO_BAUD               = 500000
 ARDUINO_ROWS               = 32
-ARDUINO_COLS               = 56          # 7 pannelli × 8
+ARDUINO_COLS               = 56          # 7 pannelli × 8 LED = 56 colonne totali
 ARDUINO_PANEL_W            = 8
 ARDUINO_PANEL_H            = 32
 ARDUINO_PANELS_COUNT       = 7
-ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]
+ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]  # ordine fisico da destra a sinistra
 ARDUINO_PANEL_START_BOTTOM = [False] * 7
 ARDUINO_SERPENTINE_X       = True
 
@@ -96,8 +96,14 @@ COLOR_RANGES = {
 # ============================================================
 # MIRINO — PARAMETRI
 # ============================================================
-CROSSHAIR_HALF  = 150       # metà lato del quadrato di rilevamento (px)
-MIN_COLOR_RATIO = 0.06      # almeno 6% dei pixel nel mirino (biglia piccola = ~8%)
+CROSSHAIR_HALF  = None      # None = intero frame webcam (calcolato a runtime)
+MIN_COLOR_RATIO = 0.04      # almeno 4% dei pixel nel mirino
+
+# ── Velocity → FISH_SPEED mapping ──
+FISH_SPEED_MIN  = 1
+FISH_SPEED_MAX  = 8
+VEL_PIX_MIN     = 2         # px/frame sotto cui la biglia è considerata ferma
+VEL_PIX_MAX     = 40        # px/frame oltre cui si usa la velocità massima
 
 # ============================================================
 # SPRITE PESCE (da pixilart-drawing.png)
@@ -194,23 +200,20 @@ def create_arduino_serial():
         return None
 
 
-MAGIC_HEADER  = bytes([0xFF, 0x4C, 0x45])
-arduino_ready = True
+MAGIC_HEADER = bytes([0xFF, 0x4C, 0x45])
 
 def send_matrix_state(ser, matrix_rgb):
-    global arduino_ready
+    """Invia ogni frame senza handshake bloccante: svuota il buffer RX in modo
+    non-bloccante, poi trasmette sempre il frame corrente.
+    Questo garantisce fluidità costante indipendentemente dalla latenza Arduino."""
     if ser is None:
         return
+    # Svuota silenziosamente eventuali dati in arrivo (evita accumulo buffer)
     if ser.in_waiting > 0:
-        resp = ser.read_all()
-        if b'K' in resp or b'READY' in resp:
-            arduino_ready = True
-    if not arduino_ready:
-        return
+        ser.read_all()
     rgb_gamma     = gamma_table[matrix_rgb]
     mapped_pixels = rgb_gamma[LED_MAP_Y, LED_MAP_X]
     ser.write(MAGIC_HEADER + mapped_pixels.tobytes())
-    arduino_ready = False
 
 
 # ============================================================
@@ -231,23 +234,30 @@ def main():
     cap.set(cv2.CAP_PROP_FPS,            60)
 
     # ── Stato animazione pesce ──
-    FISH_SPEED        = 2       # pixel LED per frame
+    fish_speed        = 2.0     # pixel LED per frame (dinamico)
     anim_active       = False
     anim_color_name   = None
     anim_x            = 0.0
     anim_y            = ARDUINO_ROWS // 2
     anim_facing_right = True
 
-    # Cooldown: non ri-triggerare mentre la biglia è ancora nel mirino
     COOLDOWN_FRAMES  = 20
     cooldown_counter = 0
 
-    fps_t = time.time()
+    # ── Tracking velocità biglia ──
+    prev_centroid  = None
+    velocity_px    = 0.0
 
-    crosshair_half = CROSSHAIR_HALF
+    # ── Controllo FPS loop ──
+    TARGET_FPS     = 30
+    frame_interval = 1.0 / TARGET_FPS
+    fps_t          = time.time()
+    last_frame_t   = time.time()
+
+    # crosshair_half calcolato a runtime (None = intero frame)
+    crosshair_half = CROSSHAIR_HALF  # sarà sovrascritto al primo frame
 
     # ── Background subtractor: vede SOLO gli oggetti in movimento (biglie) ──
-    # Il tubo è fermo → viene imparato come sfondo → IGNORATO automaticamente
     fgbg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=30, detectShadows=False)
 
     print("[INFO] Pronto! Punta il mirino sulle biglie.")
@@ -262,6 +272,10 @@ def main():
         fh, fw = frame.shape[:2]
         mid_x, mid_y = fw // 2, fh // 2
 
+        # Primo frame: imposta crosshair a tutto schermo se non ancora calcolato
+        if crosshair_half is None:
+            crosshair_half = min(fw // 2, fh // 2)
+
         # ── 1. ESTRAI ROI MIRINO ─────────────────────────────────────
         x1 = max(0,  mid_x - crosshair_half)
         y1 = max(0,  mid_y - crosshair_half)
@@ -271,17 +285,35 @@ def main():
         roi_bgr = frame[y1:y2, x1:x2]
         roi_hsv = cv2.cvtColor(cv2.medianBlur(roi_bgr, 3), cv2.COLOR_BGR2HSV)
 
-        # ── Maschera MOVIMENTO: analizza solo i pixel che si muovono ──
-        # Il tubo è fermo → background → non influenza mai il rilevamento colore
+        # ── Maschera MOVIMENTO ────────────────────────────────────────
         fgmask = fgbg.apply(roi_bgr)
-        # Pulisci rumori piccoli con erosione/dilatazione
         kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
         fgmask = cv2.erode(fgmask, kern, iterations=1)
         fgmask = cv2.dilate(fgmask, kern, iterations=2)
-        # Applica la maschera: solo i pixel in movimento vengono colorati, il resto è nero
         roi_hsv_moving = cv2.bitwise_and(roi_hsv, roi_hsv, mask=fgmask)
 
         detected, ratio = detect_color(roi_hsv_moving)
+
+        # ── TRACKING VELOCITÀ BIGLIA ──────────────────────────────────
+        # Calcola il centroide dei pixel in movimento per misurare la velocità
+        moments = cv2.moments(fgmask)
+        if moments['m00'] > 100:   # abbastanza pixel per fidarci
+            cx_roi = int(moments['m10'] / moments['m00'])
+            cy_roi = int(moments['m01'] / moments['m00'])
+            curr_centroid = (cx_roi, cy_roi)
+            if prev_centroid is not None:
+                dx = curr_centroid[0] - prev_centroid[0]
+                dy = curr_centroid[1] - prev_centroid[1]
+                velocity_px = float(np.sqrt(dx*dx + dy*dy))
+            prev_centroid = curr_centroid
+        else:
+            prev_centroid = None
+            velocity_px = 0.0
+
+        # Mappa velocità in pixel/frame → FISH_SPEED
+        v_clamped  = max(float(VEL_PIX_MIN), min(velocity_px, float(VEL_PIX_MAX)))
+        v_norm     = (v_clamped - VEL_PIX_MIN) / (VEL_PIX_MAX - VEL_PIX_MIN)
+        fish_speed = FISH_SPEED_MIN + v_norm * (FISH_SPEED_MAX - FISH_SPEED_MIN)
 
         # ── 2. TRIGGER ANIMAZIONE ────────────────────────────────────
         if cooldown_counter > 0:
@@ -292,7 +324,7 @@ def main():
             anim_color_name = detected
             anim_x          = -8.0 if anim_facing_right else float(ARDUINO_COLS + 8)
             cooldown_counter = COOLDOWN_FRAMES
-            print(f"[TRIGGER] {detected.upper()} rilevato ({int(ratio*100)}%)")
+            print(f"[TRIGGER] {detected.upper()} rilevato ({int(ratio*100)}%) | vel={velocity_px:.1f}px/f FISH_SPEED={fish_speed:.1f}")
 
         # ── 3. RENDER MATRICE LED ────────────────────────────────────
         matrix = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
@@ -300,13 +332,21 @@ def main():
         if anim_active:
             fish_rgb = COLOR_RANGES[anim_color_name]['rgb']
             draw_fish(matrix, int(anim_x), anim_y, fish_rgb, anim_facing_right)
-            anim_x += FISH_SPEED if anim_facing_right else -FISH_SPEED
+            anim_x += fish_speed if anim_facing_right else -fish_speed
             if (anim_facing_right and anim_x > ARDUINO_COLS + 10) or \
                (not anim_facing_right and anim_x < -10):
                 anim_active       = False
                 anim_facing_right = not anim_facing_right
 
         send_matrix_state(ser, matrix)
+
+        # ── Cap a TARGET_FPS per animazione fluida e costante ─────────────
+        now = time.time()
+        elapsed = now - last_frame_t
+        sleep_t = frame_interval - elapsed
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+        last_frame_t = time.time()
 
         # ── 4. OVERLAY MIRINO SU WEBCAM ──────────────────────────────
         cross_bgr = (80, 80, 80)
