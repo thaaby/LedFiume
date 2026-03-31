@@ -68,32 +68,36 @@ LED_MAP_Y, LED_MAP_X = precompute_led_mapping()
 # ============================================================
 COLOR_RANGES = {
     'red': {
-        'lower1': np.array([0,   80,  50]),
-        'upper1': np.array([10,  255, 255]),
-        'lower2': np.array([170, 80,  50]),
+        # Rosso puro ESTREMO: Hue strettissimo (0-2/178-180) e saturazione altissima
+        # per ignorare QUALSIASI tubo arancione, anche se la webcam lo vede tendente al rosso.
+        'lower1': np.array([0,   120, 60]),
+        'upper1': np.array([3,   255, 255]),
+        'lower2': np.array([177, 120, 60]),
         'upper2': np.array([180, 255, 255]),
         'bgr': (0, 0, 255),
         'rgb': (255, 0, 0),
     },
-    'blue': {
-        'lower': np.array([85,  80,  40]),
-        'upper': np.array([130, 255, 255]),
-        'bgr': (255, 0, 0),
-        'rgb': (0, 0, 255),
-    },
     'yellow': {
-        'lower': np.array([20,  80,  50]),
+        # Giallo: S_min abbassato a 45 — il giallo desatura facilmente.
+        'lower': np.array([20,  45,  40]),
         'upper': np.array([45,  255, 255]),
         'bgr': (0, 255, 255),
         'rgb': (255, 255, 0),
+    },
+    'blue': {
+        # Blu: S_min abbassato a 45, V_min a 25 per blu scuri.
+        'lower': np.array([85,  45,  25]),
+        'upper': np.array([135, 255, 255]),
+        'bgr': (255, 0, 0),
+        'rgb': (0, 0, 255),
     },
 }
 
 # ============================================================
 # MIRINO — PARAMETRI
 # ============================================================
-CROSSHAIR_HALF  = 35        # metà lato del quadrato di rilevamento (px)
-MIN_COLOR_RATIO = 0.10      # almeno 10% dei pixel nel mirino devono matchare
+CROSSHAIR_HALF  = 150       # metà lato del quadrato di rilevamento (px)
+MIN_COLOR_RATIO = 0.06      # almeno 6% dei pixel nel mirino (biglia piccola = ~8%)
 
 # ============================================================
 # SPRITE PESCE (da pixilart-drawing.png)
@@ -240,7 +244,14 @@ def main():
 
     fps_t = time.time()
 
-    print("[INFO] Pronto! Punta il mirino sulle biglie. 'q' per uscire.")
+    crosshair_half = CROSSHAIR_HALF
+
+    # ── Background subtractor: vede SOLO gli oggetti in movimento (biglie) ──
+    # Il tubo è fermo → viene imparato come sfondo → IGNORATO automaticamente
+    fgbg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=30, detectShadows=False)
+
+    print("[INFO] Pronto! Punta il mirino sulle biglie.")
+    print("[INFO] Tasti: 'q' per uscire | '+' o '-' per ridimensionare il mirino | 'f' mirino a tutto schermo.")
 
     while True:
         ret, frame = cap.read()
@@ -252,15 +263,25 @@ def main():
         mid_x, mid_y = fw // 2, fh // 2
 
         # ── 1. ESTRAI ROI MIRINO ─────────────────────────────────────
-        x1 = max(0,  mid_x - CROSSHAIR_HALF)
-        y1 = max(0,  mid_y - CROSSHAIR_HALF)
-        x2 = min(fw, mid_x + CROSSHAIR_HALF)
-        y2 = min(fh, mid_y + CROSSHAIR_HALF)
+        x1 = max(0,  mid_x - crosshair_half)
+        y1 = max(0,  mid_y - crosshair_half)
+        x2 = min(fw, mid_x + crosshair_half)
+        y2 = min(fh, mid_y + crosshair_half)
 
         roi_bgr = frame[y1:y2, x1:x2]
         roi_hsv = cv2.cvtColor(cv2.medianBlur(roi_bgr, 3), cv2.COLOR_BGR2HSV)
 
-        detected, ratio = detect_color(roi_hsv)
+        # ── Maschera MOVIMENTO: analizza solo i pixel che si muovono ──
+        # Il tubo è fermo → background → non influenza mai il rilevamento colore
+        fgmask = fgbg.apply(roi_bgr)
+        # Pulisci rumori piccoli con erosione/dilatazione
+        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        fgmask = cv2.erode(fgmask, kern, iterations=1)
+        fgmask = cv2.dilate(fgmask, kern, iterations=2)
+        # Applica la maschera: solo i pixel in movimento vengono colorati, il resto è nero
+        roi_hsv_moving = cv2.bitwise_and(roi_hsv, roi_hsv, mask=fgmask)
+
+        detected, ratio = detect_color(roi_hsv_moving)
 
         # ── 2. TRIGGER ANIMAZIONE ────────────────────────────────────
         if cooldown_counter > 0:
@@ -304,8 +325,16 @@ def main():
         cv2.line(frame, (mid_x, mid_y + gap), (mid_x, mid_y + 25), cross_bgr, 1)
         # Label colore
         if label:
-            cv2.putText(frame, label, (x2 + 8, mid_y + 5),
+            cv2.putText(frame, label, (x2 + 8, mid_y - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, cross_bgr, 2)
+
+        # HSV live al centro del mirino (debug calibrazione)
+        center_h = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 0])
+        center_s = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 1])
+        center_v = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 2])
+        cv2.putText(frame, f"H:{center_h} S:{center_s} V:{center_v}",
+                    (x2 + 8, mid_y + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 200, 200), 1)
 
         # FPS + stato
         now = time.time()
@@ -322,8 +351,18 @@ def main():
         preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
         cv2.imshow("LED Matrix", preview_bgr)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
             break
+        elif key == ord('+') or key == ord('='):
+            crosshair_half = min(crosshair_half + 10, fw // 2, fh // 2)
+        elif key == ord('-'):
+            crosshair_half = max(crosshair_half - 10, 5)
+        elif key == ord('f'):
+            if crosshair_half >= min(fw // 2, fh // 2) - 10:
+                crosshair_half = 30
+            else:
+                crosshair_half = min(fw // 2, fh // 2)
 
     # ── CLEANUP ──
     cap.release()
