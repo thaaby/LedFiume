@@ -22,12 +22,12 @@ ARDUINO_ENABLED            = True
 ARDUINO_PORT               = "auto"
 ARDUINO_BAUD               = 500000
 ARDUINO_ROWS               = 32
-ARDUINO_COLS               = 32
+ARDUINO_COLS               = 56          # 7 pannelli × 8 = 56
 ARDUINO_PANEL_W            = 8
 ARDUINO_PANEL_H            = 32
-ARDUINO_PANELS_COUNT       = 4
-ARDUINO_PANEL_ORDER        = [3, 2, 1, 0]
-ARDUINO_PANEL_START_BOTTOM = [False, False, False, False]
+ARDUINO_PANELS_COUNT       = 7           # era 4
+ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]
+ARDUINO_PANEL_START_BOTTOM = [False] * 7
 ARDUINO_SERPENTINE_X       = True
 
 GAMMA       = 2.5
@@ -71,28 +71,27 @@ LED_MAP_Y, LED_MAP_X = precompute_led_mapping()
 #   - Se vengono rilevati falsi positivi: alzare S_min/V_min o abbassare MAX_R
 COLOR_RANGES = {
     'red': {
-        # Due lati dello spettro hue — S/V alti evitano pelle e legno
-        'lower1': np.array([0,   160,  80]),
-        'upper1': np.array([8,   255, 255]),
-        'lower2': np.array([172, 160,  80]),
+        # Rosso: 0-10 + 170-180 = 20° (era 14°). S_min 70 per tollerare riflessi.
+        # Non si estende oltre Hue 10 per non entrare in zona arancione-tubo.
+        'lower1': np.array([0,   70,  30]),
+        'upper1': np.array([10,  255, 255]),
+        'lower2': np.array([170, 70,  30]),
         'upper2': np.array([180, 255, 255]),
         'bgr': (0, 0, 255),
         'rgb': (255, 0, 0),
     },
     'blue': {
-        # Calibrato sulla biglia in foto: azzurro-ciano saturo.
-        # S_min=120 esclude cieli, sfondi chiari, navy opaco.
-        # V_min=90  esclude blu scuro di vestiti/jeans.
-        # H 90-125  non cattura il verde (H<90) né il viola (H>130).
-        'lower': np.array([90,  120,  90]),
-        'upper': np.array([125, 255, 255]),
+        # Azzurro
+        'lower': np.array([85,  80,  40]),
+        'upper': np.array([130, 255, 255]),
         'bgr': (255, 0, 0),
         'rgb': (0, 0, 255),
     },
     'yellow': {
-        # S_min=110: esclude giallo-verde pallido di piante, pareti calde
-        'lower': np.array([18, 110,  80]),
-        'upper': np.array([38, 255, 255]),
+        # Giallo: H da 20 (era 24). S_min 60 per tollerare riflessi.
+        # Non scende sotto 20 per non entrare in zona arancione-tubo.
+        'lower': np.array([20,  60,  50]),
+        'upper': np.array([45, 255, 255]),
         'bgr': (0, 255, 255),
         'rgb': (255, 255, 0),
     },
@@ -101,104 +100,71 @@ COLOR_RANGES = {
 # ============================================================
 # PARAMETRI GEOMETRICI BIGLIA
 # ============================================================
-# Biglia ~3.5cm diametro (da foto).
+# Biglia ~2.3cm diametro.
 # Calcolo a SCALE_FACTOR=0.75 su webcam 640x480 con FOV ~70°:
-#   a 25cm → raggio ~28px  |  a 50cm → raggio ~14px  |  a 80cm → raggio ~9px
-# MIN_R=7  — sotto questa soglia è rumore o riflesso puntuale
-# MAX_R=30 — sopra questa soglia è un oggetto grande (braccio, spalla, testa, vestito)
-#            equivale a ~40px su frame pieno, che è già più grande di una testa a 1m
-MIN_R    = 7
-MAX_R    = 30
+#   a 25cm → raggio ~16px | a 50cm → raggio ~8px | a 80cm → ~5px | a 100cm → ~4px
+MIN_R    = 6
+MAX_R    = 25
+CIRC_MIN  = 0.50    # Abbassato: riflessi/occlusione nel tubo distorcono il contorno
+SOLID_MIN = 0.60    # Abbassato: biglie adiacenti e bordi tubo riducono solidità
 
-# Circolarità minima: 4π·A/P²
-#   Biglia perfetta       → ~1.00
-#   Biglia con blur 2:1   → ~0.70
-#   Biglia con blur 3:1   → ~0.50 (limite inferiore realistico)
-#   Patch di vestito/muro → ~0.15–0.35
-CIRC_MIN = 0.42
+CIRC_MIN_FAST  = 0.45
+SOLID_MIN_FAST = 0.65
+MAX_R_FAST     = 48
 
-# Solidità minima: area_contorno / area_convex_hull
-#   Sfera (sempre convessa) → 0.90–1.00
-#   Oggetto con rientranze  → 0.50–0.80
-#   Persone/indumenti       → 0.60–0.85  (filtro secondario + circolarità)
-SOLID_MIN = 0.82
-
-# Soglie FAST: si attivano solo dentro la ROI predittiva di una biglia già tracciata
-# e ad alta velocità. Fuori da quella zona i filtri normali rimangono intatti.
-CIRC_MIN_FAST  = 0.25   # blur 4:1 → ~0.38, accetta striscia da lancio veloce
-SOLID_MIN_FAST = 0.62   # forma allungata ma ancora prevalentemente convessa
-MAX_R_FAST     = 48     # biglia con blur occupa più spazio del normale
-
-# Velocità (px/frame, coordinate full-res) sopra cui si attivano soglie FAST
-# e si allarga il ROI di predizione. A 60fps: 18 px/frame ≈ 69 cm/s
 SPEED_THRESHOLD   = 18
-# Il raggio del ROI di predizione cresce di N px (a SCALE_FACTOR) per ogni px/frame
 SPEED_ROI_FACTOR  = 2.2
 
 # ============================================================
-# ANIMAZIONE PESCE — Clownfish Nemo multi-layer
+# SPRITE PESCE — caricato da pixilart-drawing.png (32×32, RGBA)
 # ============================================================
-# Sprite rivolto a DESTRA. Anchor = punta sinistra della coda.
-# Coordinate (dy, dx): dy negativo = verso l'alto, dx positivo = verso destra.
-#
-# Layer di disegno (in ordine, gli ultimi sovrascrivono i precedenti):
-#   1. CORPO (body_color = colore pallina rilevata)
-#   2. CODA interna (body_color)
-#   3. STRISCIA BIANCA verticale
-#   4. CONTORNO NERO (corpo + pinna dorsale + coda)
-#   5. OCCHIO bianco
-#   6. PUPILLA nera
+# Pixel estratti al centro del bounding box del disegno.
+# I colori arancione (255,126,0) e rosso (237,28,36) vengono sostituiti
+# con il colore della pallina rilevata.
+# facing_right=False specchia orizzontalmente (dx negato).
 
-# Pixel estratti dinamicamente dal PNG
-FISH_PIXELS = []
-FISH_WIDTH  = 18
+# Colori del sprite da rimpiazzare col colore pallina
+_FISH_BODY_COLORS = {(255, 126, 0), (237, 28, 36)}
 
-def load_fish_sprite():
-    global FISH_WIDTH, FISH_PIXELS
-    sprite_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pixilart-drawing.png')
-    if os.path.exists(sprite_path):
-        img = cv2.imread(sprite_path, cv2.IMREAD_UNCHANGED)
-        if img is not None and len(img.shape) == 3 and img.shape[2] == 4:
-            ys, xs = np.where(img[:, :, 3] > 0)
-            if len(xs) > 0:
-                min_x, max_x = np.min(xs), np.max(xs)
-                anchor_x_img = min_x
-                anchor_y_img = (np.min(ys) + np.max(ys)) // 2
-                FISH_WIDTH   = max_x - min_x + 1
-                
-                for y, x in zip(ys, xs):
-                    b, g, r, a = img[y, x]
-                    # Capovolge verticalmente in modo che la pinna stia in alto
-                    dy = anchor_y_img - y
-                    dx = x - anchor_x_img
-                    FISH_PIXELS.append((dy, dx, (int(r), int(g), int(b))))
-                print(f"[INFO] Sprite caricato con successo ({len(FISH_PIXELS)} pixel, larghezza {FISH_WIDTH})")
+# Lista di (dy, dx, rgb) con origine al centro del bounding box
+_FISH_PIXELS: list = []
 
-# Esegui caricamento all'avvio
-load_fish_sprite()
+def _load_fish_sprite():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pixilart-drawing.png')
+    img  = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None or img.ndim < 3 or img.shape[2] != 4:
+        print(f"[WARN] {path} non trovato o non RGBA — sprite non caricato")
+        return
+    ys, xs = np.where(img[:, :, 3] > 0)
+    if len(xs) == 0:
+        return
+    cx = (int(xs.min()) + int(xs.max())) // 2
+    cy = (int(ys.min()) + int(ys.max())) // 2
+    for y, x in zip(ys.tolist(), xs.tolist()):
+        b, g, r, _ = img[y, x]
+        _FISH_PIXELS.append((y - cy, x - cx, (int(r), int(g), int(b))))
+    print(f"[OK] Sprite PNG: {len(_FISH_PIXELS)} pixel, centro PNG=({cx},{cy})")
 
-# Ogni quanti frame avanza di 1 pixel — 3 @ 60fps ≈ 2.5s per attraversare i 32px
-FISH_STEP_FRAMES  = 3
-FISH_COOLDOWN_SEC = 5.0
+_load_fish_sprite()
 
-# Stati della macchina a stati
-FISH_IDLE      = 0
-FISH_ANIMATING = 1
-FISH_COOLDOWN  = 2
+# Soglia velocità Kalman (px/frame, full-res) per aggiornare la direzione.
+# Sotto soglia → mantieni la direzione corrente (evita flickering).
+VX_DIRECTION_THRESHOLD = 3.0
 
-def draw_fish(matrix, anchor_x, anchor_y, body_color):
+
+def draw_fish(matrix, cx, cy, body_color, facing_right=True):
     """
-    Disegna il pesce dal PNG pixel-perfect.
-    Sostituisce arancione o rosso con il colore rilevato della pallina (body_color).
+    Disegna il pesciolino dal PNG centrato in (cx, cy) sulla matrice 32×32.
+    facing_right=False specchia orizzontalmente il pesce.
+    body_color: RGB tuple — sostituisce l'arancione/rosso del PNG.
     """
-    for dy, dx, color in FISH_PIXELS:
-        r, c = anchor_y + dy, anchor_x + dx
-        if 0 <= r < 32 and 0 <= c < 32:
-            # Colori corpo originali: Arancio=(255, 126, 0), Rosso=(237, 28, 36)
-            if color == (255, 126, 0) or color == (237, 28, 36):
-                matrix[r, c] = body_color
-            else:
-                matrix[r, c] = color
+    rows, cols = matrix.shape[:2]
+    s = 1 if facing_right else -1
+    for dy, dx, color in _FISH_PIXELS:
+        r = cy - dy   # negato: Y immagine va giù, Y LED va su
+        c = cx + s * dx
+        if 0 <= r < rows and 0 <= c < cols:
+            matrix[r, c] = body_color if color in _FISH_BODY_COLORS else color
 
 # ============================================================
 # TRACKER  (KALMAN + HUNGARIAN)
@@ -218,15 +184,17 @@ class TrackedObject:
                                                [0, 1, 0, 1],
                                                [0, 0, 1, 0],
                                                [0, 0, 0, 1]], np.float32)
-        # Q alto (0.15) → segue cambi bruschi di direzione
-        self.kf.processNoiseCov     = np.eye(4, dtype=np.float32) * 0.15
-        # R esplicito → bilancia fiducia misura vs predizione
-        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1.5
+        # Q alto (0.3) → segue cambi rapidi di direzione/velocità
+        self.kf.processNoiseCov     = np.eye(4, dtype=np.float32) * 0.3
+        # R basso (1.0) → misure più fidate, meno smoothing
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1.0
         self.kf.errorCovPost        = np.eye(4, dtype=np.float32) * 0.1
 
         self.kf.statePre  = np.array([[start_pt[0]], [start_pt[1]], [0.], [0.]], np.float32)
         self.kf.statePost = np.array([[start_pt[0]], [start_pt[1]], [0.], [0.]], np.float32)
         self.predicted_pos = start_pt
+        self.ema_pos = start_pt
+        self.last_x  = start_pt[0]
 
     def speed(self):
         """Velocità stimata in px/frame (coordinate full-res) dal vettore Kalman."""
@@ -242,6 +210,13 @@ class TrackedObject:
     def correct(self, pt):
         self.kf.correct(np.array([[pt[0]], [pt[1]]], np.float32))
         self.predicted_pos      = pt
+        
+        # EMA Filter per bypassare il ritardo del Kalman (Latenza 0)
+        alpha = 0.80
+        self.ema_pos = (
+            self.ema_pos[0] * (1 - alpha) + pt[0] * alpha,
+            self.ema_pos[1] * (1 - alpha) + pt[1] * alpha
+        )
         self.disappeared_frames = 0
         self.hits              += 1
 
@@ -379,55 +354,76 @@ def main():
     PROC_W = int(640 * SCALE_FACTOR)   # 480
     PROC_H = int(480 * SCALE_FACTOR)   # 360
 
-    # MOG2: impara il background statico in ~200 frame, poi restituisce solo
-    # le regioni che si muovono. varThreshold=40 calibrato per luce mista indoor.
-    bg_sub = cv2.createBackgroundSubtractorMOG2(
-        history=400, varThreshold=40, detectShadows=False)
+    print("[INFO] All'avvio, seleziona il TUBO con il mouse e premi SPAZIO o INVIO.")
+    tube_mask = np.zeros((PROC_H, PROC_W), dtype=np.uint8)
+    for _ in range(5): cap.read()  # Scarta i primissimi frame neri/corrotti
+    ret, start_frame = cap.read()
+    if ret:
+        start_frame = cv2.flip(start_frame, 1)
+        start_proc = cv2.resize(start_frame, (PROC_W, PROC_H))
+        roi = cv2.selectROI("Seleziona il TUBO (FIUME), poi premi SPAZIO", start_proc, showCrosshair=True, fromCenter=False)
+        cv2.destroyWindow("Seleziona il TUBO (FIUME), poi premi SPAZIO")
+        cv2.waitKey(1)
+        
+        tube_h_lower = np.array([0, 0, 0])
+        tube_h_upper = np.array([0, 0, 0])
+        if roi[2] > 0 and roi[3] > 0:
+            x, y, w, h = int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])
+            cv2.rectangle(tube_mask, (x, y), (x+w, y+h), 255, -1)
+            print(f"[OK] Maschera Tubo applicata. Tracking confinato al rettangolo! (w:{w}, h:{h})")
+            
+            # --- CAMPIONAMENTO COLORE TUBO (H + S + V) ---
+            tube_roi_bgr = start_proc[y:y+h, x:x+w]
+            tube_roi_hsv = cv2.cvtColor(tube_roi_bgr, cv2.COLOR_BGR2HSV)
+            hist_h = cv2.calcHist([tube_roi_hsv], [0], None, [180], [0, 180])
+            dominant_h = int(np.argmax(hist_h))
+            median_s   = int(np.median(tube_roi_hsv[:, :, 1]))
+            median_v   = int(np.median(tube_roi_hsv[:, :, 2]))
 
-    # CLAHE sul canale V: normalizza i riflessi speculari sulla superficie lucida.
-    # Senza CLAHE un punto bianco brillante "distrugge" il colore percepito.
+            # Range HSV stretto: esclude solo pixel MOLTO simili al tubo in H, S e V.
+            # Una biglia rossa/gialla ha S/V diversi dal tubo → non viene mascherata.
+            margin_h = 8
+            margin_s = 40
+            margin_v = 40
+            tube_h_lower = np.array([max(0,   dominant_h - margin_h),
+                                     max(0,   median_s   - margin_s),
+                                     max(0,   median_v   - margin_v)])
+            tube_h_upper = np.array([min(179, dominant_h + margin_h),
+                                     min(255, median_s   + margin_s),
+                                     min(255, median_v   + margin_v)])
+            print(f"[OK] Colore Tubo campionato! H:{dominant_h} S:{median_s} V:{median_v}"
+                  f" → range H[{tube_h_lower[0]}-{tube_h_upper[0]}]"
+                  f" S[{tube_h_lower[1]}-{tube_h_upper[1]}]"
+                  f" V[{tube_h_lower[2]}-{tube_h_upper[2]}]")
+            
+        else:
+            print("[WARN] Nessuna selezione: tracking sull'intero perimetro.")
+            tube_mask.fill(255)
+    else:
+        tube_mask.fill(255)
+
+    # CLAHE sul canale V per gestire i riflessi lucidi delle biglie
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
 
-    tracker = MarbleTracker(max_distance=200, max_disappeared=12)
+    tracker = MarbleTracker(max_distance=250, max_disappeared=20)
 
-    # Kernel ellittici: più precisi di quelli rettangolari per oggetti circolari
+    # Kernel ellittici: precisi per cerchi reali
     kernel_open  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
 
-    # Precalcola aree minima/massima dai raggi fisici
     min_area = math.pi * MIN_R  * MIN_R
     max_area = math.pi * MAX_R * MAX_R
 
-    # --- WARMUP BACKGROUND MODEL ---
-    # Tenere la scena ferma (senza biglie) durante il warmup.
-    # MOG2 assorbirebbe la biglia statica nel background se è già presente.
-    WARMUP_FRAMES = 200
-    print(f"[INFO] Calibrazione background ({WARMUP_FRAMES} frame)...")
-    print("[INFO] Tenere la scena ferma senza biglie.")
-    for i in range(WARMUP_FRAMES):
-        ret, f = cap.read()
-        if not ret:
-            break
-        f    = cv2.flip(f, 1)
-        proc = cv2.resize(f, (PROC_W, PROC_H))
-        proc = cv2.medianBlur(proc, 5)
-        bg_sub.apply(proc)
-        if i % 50 == 0:
-            print(f"  ... {i}/{WARMUP_FRAMES}")
-    print("[INFO] Pronto. Introduci le biglie.")
+    print("[INFO] Pronto! Avvio tracking. Introduci le biglie.")
     print("[INFO] Tasti: 'q' esci | 'd' toggle debug mask")
 
     debug_mode  = True
     fps_history = deque(maxlen=30)
     prev_time   = time.time()
 
-    # --- STATE MACHINE ANIMAZIONE PESCE ---
-    fish_state      = FISH_IDLE
-    fish_x          = -FISH_WIDTH   # posizione ancora del pesce (colonna coda)
-    fish_frame_tick = 0             # conta i frame per il passo del pesce
-    cooldown_start  = 0.0           # timestamp inizio cooldown
-    fish_color_rgb  = (255, 255, 255)  # colore attivo del pesce (sovrascritto al trigger)
-    matrix_render   = np.zeros((32, 32, 3), dtype=np.uint8)
+    # --- TRACKING 1:1 PESCE ---
+    fish_facing_right = True        # direzione corrente del pesce
+    matrix_render     = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
 
     while True:
         ret, frame = cap.read()
@@ -444,35 +440,39 @@ def main():
         proc = cv2.resize(frame, (PROC_W, PROC_H))
         # medianBlur preserva i bordi cromatici: il Gaussian li smussa
         # spostando il centroide verso zone adiacenti di colore diverso
-        proc = cv2.medianBlur(proc, 5)
+        proc = cv2.medianBlur(proc, 3)
 
-        # ── 2. MOTION MASK ────────────────────────────────────────────────
-        fg = bg_sub.apply(proc)
-        _, fg       = cv2.threshold(fg, 200, 255, cv2.THRESH_BINARY)
-        motion_mask = cv2.dilate(fg, np.ones((22, 22), np.uint8), iterations=2)
+        # ── 2. PREPARAZIONE MASCHERA TUBO / ROI ───────────────────────────
+        # Anziché usare MOG2 (che creava forme quadrate sgranate all'inizio),
+        # ci affidiamo ESCLUSIVAMENTE al recinto del tubo. 
+        # Questo garantisce che la forma letta sia fin dal primo istante quella fisica 1:1.
+        master_mask = tube_mask.copy()
 
-        # ROI Kalman adattivo: il raggio cresce con la velocità stimata.
-        # Mantiene tracking sia a bassa velocità (MOG2 non rileva movimento)
-        # che ad alta velocità (la biglia si sposta molto tra un frame e l'altro).
+        # ROI Kalman adattivo (assiste i filtri geometrici rilassati per biglie veloci)
         fast_roi_mask = np.zeros((PROC_H, PROC_W), dtype=np.uint8)
         for obj in tracker.objects.values():
-            px      = int(max(0, min(PROC_W - 1, obj.predicted_pos[0] * SCALE_FACTOR)))
-            py      = int(max(0, min(PROC_H - 1, obj.predicted_pos[1] * SCALE_FACTOR)))
-            spd     = obj.speed()
-            roi_r   = min(int(55 + spd * SPEED_ROI_FACTOR * SCALE_FACTOR), 130)
-            cv2.circle(motion_mask, (px, py), roi_r, 255, -1)
-            # fast_roi_mask: zona dove si usano soglie geometriche più permissive
+            px  = int(max(0, min(PROC_W - 1, obj.predicted_pos[0] * SCALE_FACTOR)))
+            py  = int(max(0, min(PROC_H - 1, obj.predicted_pos[1] * SCALE_FACTOR)))
+            spd = obj.speed()
             if spd > SPEED_THRESHOLD:
+                roi_r = min(int(70 + spd * SPEED_ROI_FACTOR * SCALE_FACTOR), 150)
                 cv2.circle(fast_roi_mask, (px, py), roi_r, 255, -1)
+                
+        fast_roi_mask = cv2.bitwise_and(fast_roi_mask, tube_mask)
 
         # ── 3. CLAHE su canale V ──────────────────────────────────────────
         hsv    = cv2.cvtColor(proc, cv2.COLOR_BGR2HSV)
         h, s, v = cv2.split(hsv)
         hsv_eq  = cv2.merge([h, s, clahe.apply(v)])
 
+        # Maschera tubo: esclude pixel simili al tubo in H+S+V (range stretto)
+        detected_tube = cv2.inRange(hsv_eq, tube_h_lower, tube_h_upper)
+        ignore_tube_mask = cv2.bitwise_not(detected_tube)
+
         # ── 4. RILEVAMENTO COLORE + FILTRI GEOMETRICI ─────────────────────
         input_centroids = []
         input_colors    = []
+        debug_mask_all  = np.zeros((PROC_H, PROC_W), dtype=np.uint8)
 
         for color_name, params in COLOR_RANGES.items():
             if color_name == 'red':
@@ -482,10 +482,12 @@ def main():
             else:
                 cmask = cv2.inRange(hsv_eq, params['lower'], params['upper'])
 
+            cmask = cv2.bitwise_and(cmask, master_mask)
+            cmask = cv2.bitwise_and(cmask, ignore_tube_mask)
+            
             cmask = cv2.morphologyEx(cmask, cv2.MORPH_OPEN,  kernel_open)
             cmask = cv2.morphologyEx(cmask, cv2.MORPH_CLOSE, kernel_close)
-            # Applica motion mask: analizza solo regioni in movimento + ROI predittive
-            cmask = cv2.bitwise_and(cmask, motion_mask)
+            debug_mask_all = cv2.bitwise_or(debug_mask_all, cmask)
 
             contours, _ = cv2.findContours(
                 cmask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -493,8 +495,7 @@ def main():
             for cnt in contours:
                 area = cv2.contourArea(cnt)
 
-                # Determina se questo contorno è dentro una zona "fast":
-                # centroide grezzo a basso costo (prima di qualsiasi filtro)
+                # Centroide grezzo per determinare se dentro fast ROI
                 M = cv2.moments(cnt)
                 if M["m00"] > 0:
                     in_fast = fast_roi_mask[
@@ -504,8 +505,6 @@ def main():
                 else:
                     in_fast = False
 
-                # Soglie adattive: dentro fast_roi → più permissive (biglia veloce/sfocata)
-                #                  fuori fast_roi → strette (protezione falsi positivi)
                 circ_thr     = CIRC_MIN_FAST  if in_fast else CIRC_MIN
                 solid_thr    = SOLID_MIN_FAST if in_fast else SOLID_MIN
                 max_area_eff = math.pi * (MAX_R_FAST if in_fast else MAX_R) ** 2
@@ -540,7 +539,7 @@ def main():
 
                 if debug_mode:
                     disp_r     = int(radius / SCALE_FACTOR)
-                    dot_color  = (0, 140, 255) if in_fast else (0, 220, 0)  # arancio=fast, verde=normal
+                    dot_color  = (0, 140, 255) if in_fast else (0, 220, 0)
                     cv2.circle(frame, (cx, cy), disp_r, dot_color, 1)
                     mode_tag   = "F" if in_fast else "N"
                     label      = f"{mode_tag} c{circularity:.2f} s{solidity:.2f} r{int(radius)}"
@@ -554,7 +553,7 @@ def main():
         # ── 6. OVERLAY RILEVAMENTO (solo preview webcam, non influenza LED) ─────
         frame_h, frame_w = frame.shape[:2]
         for object_id, obj in active_objects.items():
-            if obj.hits < 3:
+            if obj.hits < 2:
                 continue
             cx, cy    = obj.predicted_pos
             color_bgr = COLOR_RANGES[obj.color]['bgr']
@@ -564,64 +563,56 @@ def main():
                         (cx - 10, cy - 14),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.45, color_bgr, 2)
 
-        # ── 7. STATE MACHINE ANIMAZIONE PESCE ─────────────────────────────
-        ball_visible = any(obj.hits >= 3 for obj in active_objects.values())
-        now          = curr_time
+        # ── 7. TRACKING 1:1 ZERO-LATENCY ──────────────────────────────────
+        matrix_render = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
+        ball_visible  = False
 
-        if fish_state == FISH_IDLE:
-            matrix_render = np.zeros((32, 32, 3), dtype=np.uint8)
-            if ball_visible:
-                # Cattura il colore RGB della prima pallina valida rilevata
-                fish_color_rgb = next(
-                    COLOR_RANGES[obj.color]['rgb']
-                    for obj in active_objects.values() if obj.hits >= 3
-                )
-                fish_state      = FISH_ANIMATING
-                fish_x          = -FISH_WIDTH
-                fish_frame_tick = 0
-                print(f"[FISH] Avviato — colore {fish_color_rgb}")
+        for obj in active_objects.values():
+            if obj.hits < 2:
+                continue
+            ball_visible = True
 
-        elif fish_state == FISH_ANIMATING:
-            matrix_render = np.zeros((32, 32, 3), dtype=np.uint8)
-            # Movimento sinusoidale verticale: simula il nuoto
-            fish_cy = 16 + int(3 * math.sin(fish_x * 0.25))
-            draw_fish(matrix_render, fish_x, fish_cy, fish_color_rgb)
+            # POSIZIONE CRUDA (Zero-Latenza) INVECE DEL KALMAN (che causa ritardo)
+            bx, by = obj.ema_pos
 
-            fish_frame_tick += 1
-            if fish_frame_tick >= FISH_STEP_FRAMES:
-                fish_frame_tick = 0
-                fish_x         += 1
+            # DISEZIONE FLUIDA
+            vx_raw = bx - obj.last_x
+            if abs(vx_raw) > 1.5:  
+                fish_facing_right = vx_raw > 0
+            obj.last_x = bx
 
-            if fish_x > 32:
-                # Pesce uscito dal bordo destro → spegni e inizia cooldown
-                fish_state     = FISH_COOLDOWN
-                cooldown_start = now
-                matrix_render  = np.zeros((32, 32, 3), dtype=np.uint8)
-                print(f"[FISH] Cooldown {FISH_COOLDOWN_SEC}s")
+            # CORREZIONE ASPECT RATIO
+            # Webcam: 1.33 (640x480) | LEDs: 1.75 (56x32)
+            # Senza compensazione, il pesce si deforma spostandosi verticalmente.
+            eff_h = int(frame_w * (ARDUINO_ROWS / ARDUINO_COLS))  # 640 * 32/56 = ~365px
+            y_offset = (frame_h - eff_h) / 2.0  # (480-365)/2 = ~57px superiore/inferiore
+            mapped_y = by - y_offset
 
-        elif fish_state == FISH_COOLDOWN:
-            matrix_render = np.zeros((32, 32, 3), dtype=np.uint8)
-            if now - cooldown_start >= FISH_COOLDOWN_SEC:
-                fish_state = FISH_IDLE
+            led_x = max(0, min(ARDUINO_COLS - 1, int(bx * ARDUINO_COLS / frame_w)))
+            led_y = max(0, min(ARDUINO_ROWS - 1, int(mapped_y * ARDUINO_ROWS / eff_h)))
+
+            fish_color_rgb = COLOR_RANGES[obj.color]['rgb']
+            draw_fish(matrix_render, led_x, led_y, fish_color_rgb, fish_facing_right)
+            break  # una biglia alla volta
 
         # ── 8. OVERLAY STATISTICHE ────────────────────────────────────────
         avg_fps = sum(fps_history) / len(fps_history)
-        state_labels = {FISH_IDLE: "IDLE", FISH_ANIMATING: "FISH", FISH_COOLDOWN: "COOLDOWN"}
-        cooldown_rem = max(0.0, FISH_COOLDOWN_SEC - (now - cooldown_start)) if fish_state == FISH_COOLDOWN else 0
-        state_str    = f"{state_labels[fish_state]}" + (f" {cooldown_rem:.1f}s" if fish_state == FISH_COOLDOWN else "")
+        dir_str = "→" if fish_facing_right else "←"
+        trk_str = f"TRACK {dir_str}" if ball_visible else "IDLE"
         cv2.putText(frame,
-                    f"FPS:{int(avg_fps)}  OBJ:{len(active_objects)}  {state_str}",
+                    f"FPS:{int(avg_fps)}  OBJ:{len(active_objects)}  {trk_str}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
         cv2.imshow("Marble Tracking V3 - High Accuracy", frame)
 
         if debug_mode:
-            motion_dbg = cv2.resize(motion_mask, (320, 240))
-            cv2.imshow("Motion Mask (MOG2 + ROI Kalman)", motion_dbg)
+            cmask_dbg = cv2.resize(debug_mask_all, (320, 240))
+            cv2.imshow("Color Mask (All Colors)", cmask_dbg)
         else:
-            cv2.destroyWindow("Motion Mask (MOG2 + ROI Kalman)")
+            try: cv2.destroyWindow("Color Mask (All Colors)")
+            except: pass
 
-        matrix_preview     = cv2.resize(matrix_render, (320, 320),
+        matrix_preview     = cv2.resize(matrix_render, (560, 320),
                                         interpolation=cv2.INTER_NEAREST)
         matrix_preview_bgr = cv2.cvtColor(matrix_preview, cv2.COLOR_RGB2BGR)
         cv2.imshow("Matrix 32x32 DBG", matrix_preview_bgr)
@@ -638,7 +629,7 @@ def main():
     cv2.destroyAllWindows()
     if ser:
         # Spegni tutti i LED prima di chiudere: invia frame nero
-        black_matrix = np.zeros((32, 32, 3), dtype=np.uint8)
+        black_matrix = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
         mapped       = gamma_table[black_matrix][LED_MAP_Y, LED_MAP_X]
         ser.write(MAGIC_HEADER + mapped.tobytes())
         time.sleep(0.1)  # attesa minima per garantire la ricezione
@@ -649,3 +640,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
