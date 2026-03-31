@@ -243,13 +243,15 @@ def main():
     # ── Multipesce: lista di pesci attivi ──
     # Ogni pesce è un dict: {color_name, x, y, speed, facing_right}
     active_fish   = []
-    next_right    = True          # direzione alternata per i nuovi pesci
     COOLDOWN_FRAMES = 20
     cooldowns     = {name: 0 for name in COLOR_RANGES}  # cooldown per-colore
 
-    # ── Tracking velocità biglia ──
-    prev_centroid  = None
-    velocity_px    = 0.0
+    # ── Tracking velocità e direzione biglia ──
+    prev_centroid       = None
+    velocity_px         = 0.0
+    motion_facing_right = True   # direzione dedotta dal movimento del centroide
+    dx_history          = []     # finestra scorrevole dei dx recenti per smussare la direzione
+    DX_WINDOW           = 5      # quanti frame di storia usare
 
     # ── Controllo FPS loop ──
     TARGET_FPS     = 30
@@ -308,10 +310,26 @@ def main():
                 dx = curr_centroid[0] - prev_centroid[0]
                 dy = curr_centroid[1] - prev_centroid[1]
                 velocity_px = float(np.sqrt(dx*dx + dy*dy))
+                # Se il salto è enorme (δ > 120px) è probabilmente un cambio biglia:
+                # resettiamo la storia per non usare dx spuri
+                if velocity_px > 120:
+                    dx_history.clear()
+                else:
+                    # Aggiorna finestra scorrevole dx
+                    dx_history.append(dx)
+                    if len(dx_history) > DX_WINDOW:
+                        dx_history.pop(0)
+                    # Direzione = segno della media degli ultimi dx
+                    avg_dx = sum(dx_history) / len(dx_history)
+                    if abs(avg_dx) > 0.5:          # solo se c'è una tendenza chiara
+                        motion_facing_right = avg_dx > 0
+                    elif dy != 0:                  # fallback verticale
+                        motion_facing_right = dy < 0
             prev_centroid = curr_centroid
         else:
             prev_centroid = None
-            velocity_px = 0.0
+            velocity_px   = 0.0
+            dx_history.clear()   # nessun blob attivo → reset storia
 
         # Mappa velocità in pixel/frame → fish_speed base
         v_clamped  = max(float(VEL_PIX_MIN), min(velocity_px, float(VEL_PIX_MAX)))
@@ -325,8 +343,7 @@ def main():
 
         for color_name, ratio in detected_list:
             if cooldowns[color_name] == 0:
-                facing = next_right
-                next_right = not next_right
+                facing = motion_facing_right   # segue la direzione della pallina
                 start_x = -8.0 if facing else float(ARDUINO_COLS + 8)
                 active_fish.append({
                     'color_name':   color_name,
@@ -336,9 +353,10 @@ def main():
                     'facing_right': facing,
                 })
                 cooldowns[color_name] = COOLDOWN_FRAMES
+                dir_label = "→" if facing else "←"
                 print(f"[TRIGGER] {color_name.upper()} rilevato ({int(ratio*100)}%) "
                       f"| vel={velocity_px:.1f}px/f speed={base_speed:.1f} "
-                      f"| pesci attivi={len(active_fish)}")
+                      f"| dir={dir_label} pesci attivi={len(active_fish)}")
 
         # ── 3. RENDER MATRICE LED (tutti i pesci) ────────────────────────
         matrix = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
