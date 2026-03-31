@@ -145,16 +145,14 @@ def draw_fish(matrix, cx, cy, body_color, facing_right=True):
 # ============================================================
 # RILEVAMENTO COLORE NEL MIRINO
 # ============================================================
-def detect_color(hsv_roi):
-    """Ritorna (color_name, ratio) oppure (None, 0.0).
-    Usa 'min_ratio' per-colore se presente, altrimenti MIN_COLOR_RATIO globale."""
+def detect_colors(hsv_roi):
+    """Ritorna una lista di (color_name, ratio) per TUTTI i colori sopra soglia.
+    Permette il rilevamento simultaneo di più biglie di colori diversi."""
     total = hsv_roi.shape[0] * hsv_roi.shape[1]
     if total == 0:
-        return None, 0.0
+        return []
 
-    best_name  = None
-    best_ratio = 0.0
-
+    found = []
     for name, params in COLOR_RANGES.items():
         threshold = params.get('min_ratio', MIN_COLOR_RATIO)
         if name == 'red':
@@ -165,11 +163,10 @@ def detect_color(hsv_roi):
             m = cv2.inRange(hsv_roi, params['lower'], params['upper'])
 
         ratio = cv2.countNonZero(m) / total
-        if ratio >= threshold and ratio > best_ratio:
-            best_ratio = ratio
-            best_name  = name
+        if ratio >= threshold:
+            found.append((name, ratio))
 
-    return best_name, best_ratio
+    return found
 
 
 # ============================================================
@@ -243,16 +240,12 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT,   480)
     cap.set(cv2.CAP_PROP_FPS,            60)
 
-    # ── Stato animazione pesce ──
-    fish_speed        = 2.0     # pixel LED per frame (dinamico)
-    anim_active       = False
-    anim_color_name   = None
-    anim_x            = 0.0
-    anim_y            = ARDUINO_ROWS // 2
-    anim_facing_right = True
-
-    COOLDOWN_FRAMES  = 20
-    cooldown_counter = 0
+    # ── Multipesce: lista di pesci attivi ──
+    # Ogni pesce è un dict: {color_name, x, y, speed, facing_right}
+    active_fish   = []
+    next_right    = True          # direzione alternata per i nuovi pesci
+    COOLDOWN_FRAMES = 20
+    cooldowns     = {name: 0 for name in COLOR_RANGES}  # cooldown per-colore
 
     # ── Tracking velocità biglia ──
     prev_centroid  = None
@@ -302,7 +295,7 @@ def main():
         fgmask = cv2.dilate(fgmask, kern, iterations=2)
         roi_hsv_moving = cv2.bitwise_and(roi_hsv, roi_hsv, mask=fgmask)
 
-        detected, ratio = detect_color(roi_hsv_moving)
+        detected_list = detect_colors(roi_hsv_moving)
 
         # ── TRACKING VELOCITÀ BIGLIA ──────────────────────────────────
         # Calcola il centroide dei pixel in movimento per misurare la velocità
@@ -320,33 +313,47 @@ def main():
             prev_centroid = None
             velocity_px = 0.0
 
-        # Mappa velocità in pixel/frame → FISH_SPEED
+        # Mappa velocità in pixel/frame → fish_speed base
         v_clamped  = max(float(VEL_PIX_MIN), min(velocity_px, float(VEL_PIX_MAX)))
         v_norm     = (v_clamped - VEL_PIX_MIN) / (VEL_PIX_MAX - VEL_PIX_MIN)
-        fish_speed = FISH_SPEED_MIN + v_norm * (FISH_SPEED_MAX - FISH_SPEED_MIN)
+        base_speed = FISH_SPEED_MIN + v_norm * (FISH_SPEED_MAX - FISH_SPEED_MIN)
 
-        # ── 2. TRIGGER ANIMAZIONE ────────────────────────────────────
-        if cooldown_counter > 0:
-            cooldown_counter -= 1
+        # ── 2. TRIGGER MULTIPESCE ────────────────────────────────────
+        for name in cooldowns:
+            if cooldowns[name] > 0:
+                cooldowns[name] -= 1
 
-        if detected and not anim_active and cooldown_counter == 0:
-            anim_active     = True
-            anim_color_name = detected
-            anim_x          = -8.0 if anim_facing_right else float(ARDUINO_COLS + 8)
-            cooldown_counter = COOLDOWN_FRAMES
-            print(f"[TRIGGER] {detected.upper()} rilevato ({int(ratio*100)}%) | vel={velocity_px:.1f}px/f FISH_SPEED={fish_speed:.1f}")
+        for color_name, ratio in detected_list:
+            if cooldowns[color_name] == 0:
+                facing = next_right
+                next_right = not next_right
+                start_x = -8.0 if facing else float(ARDUINO_COLS + 8)
+                active_fish.append({
+                    'color_name':   color_name,
+                    'x':            start_x,
+                    'y':            ARDUINO_ROWS // 2,
+                    'speed':        base_speed,
+                    'facing_right': facing,
+                })
+                cooldowns[color_name] = COOLDOWN_FRAMES
+                print(f"[TRIGGER] {color_name.upper()} rilevato ({int(ratio*100)}%) "
+                      f"| vel={velocity_px:.1f}px/f speed={base_speed:.1f} "
+                      f"| pesci attivi={len(active_fish)}")
 
-        # ── 3. RENDER MATRICE LED ────────────────────────────────────
+        # ── 3. RENDER MATRICE LED (tutti i pesci) ────────────────────────
         matrix = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
 
-        if anim_active:
-            fish_rgb = COLOR_RANGES[anim_color_name]['rgb']
-            draw_fish(matrix, int(anim_x), anim_y, fish_rgb, anim_facing_right)
-            anim_x += fish_speed if anim_facing_right else -fish_speed
-            if (anim_facing_right and anim_x > ARDUINO_COLS + 10) or \
-               (not anim_facing_right and anim_x < -10):
-                anim_active       = False
-                anim_facing_right = not anim_facing_right
+        next_fish = []
+        for fish in active_fish:
+            fish_rgb = COLOR_RANGES[fish['color_name']]['rgb']
+            draw_fish(matrix, int(fish['x']), fish['y'], fish_rgb, fish['facing_right'])
+            fish['x'] += fish['speed'] if fish['facing_right'] else -fish['speed']
+            # Rimuovi il pesce solo quando esce completamente dallo schermo
+            if fish['facing_right'] and fish['x'] < ARDUINO_COLS + 10:
+                next_fish.append(fish)
+            elif not fish['facing_right'] and fish['x'] > -10:
+                next_fish.append(fish)
+        active_fish = next_fish
 
         send_matrix_state(ser, matrix)
 
@@ -361,9 +368,9 @@ def main():
         # ── 4. OVERLAY MIRINO SU WEBCAM ──────────────────────────────
         cross_bgr = (80, 80, 80)
         label = ""
-        if detected:
-            cross_bgr = COLOR_RANGES[detected]['bgr']
-            label = f"{detected.upper()} {int(ratio * 100)}%"
+        if detected_list:
+            cross_bgr = COLOR_RANGES[detected_list[0][0]]['bgr']
+            label = "  ".join(f"{n.upper()} {int(r*100)}%" for n, r in detected_list)
 
         # Rettangolo mirino
         cv2.rectangle(frame, (x1, y1), (x2, y2), cross_bgr, 2)
@@ -390,7 +397,7 @@ def main():
         now = time.time()
         fps = 1.0 / max(now - fps_t, 1e-6)
         fps_t = now
-        status = f"ANIM {anim_color_name}" if anim_active else "IDLE"
+        status = f"PESCI:{len(active_fish)}" if active_fish else "IDLE"
         cv2.putText(frame, f"FPS:{int(fps)}  {status}",
                     (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
@@ -405,7 +412,7 @@ def main():
         if key == ord('q'):
             break
         elif key == ord('+') or key == ord('='):
-            crosshair_half = min(crosshair_half + 10, fw // 2, fh // 2)
+            crosshair_half = min(int(crosshair_half) + 10, fw // 2, fh // 2)
         elif key == ord('-'):
             crosshair_half = max(crosshair_half - 10, 5)
         elif key == ord('f'):
