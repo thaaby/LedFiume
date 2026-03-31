@@ -68,28 +68,29 @@ LED_MAP_Y, LED_MAP_X = precompute_led_mapping()
 # ============================================================
 COLOR_RANGES = {
     'red': {
-        # Rosso puro ESTREMO: Hue strettissimo (0-2/178-180) e saturazione altissima
-        # per ignorare QUALSIASI tubo arancione, anche se la webcam lo vede tendente al rosso.
         'lower1': np.array([0,   120, 60]),
         'upper1': np.array([3,   255, 255]),
         'lower2': np.array([177, 120, 60]),
         'upper2': np.array([180, 255, 255]),
         'bgr': (0, 0, 255),
         'rgb': (255, 0, 0),
+        'min_ratio': 0.04,
     },
     'yellow': {
-        # Giallo: S_min abbassato a 45 — il giallo desatura facilmente.
-        'lower': np.array([20,  45,  40]),
-        'upper': np.array([45,  255, 255]),
+        # Giallo: range Hue esteso (18-55), saturazione minima molto bassa (20)
+        # perché le biglie gialle sotto luce artificiale appaiono quasi pastello.
+        'lower': np.array([18,  20,  25]),
+        'upper': np.array([55,  255, 255]),
         'bgr': (0, 255, 255),
         'rgb': (255, 255, 0),
+        'min_ratio': 0.02,   # soglia più bassa: basta 2% di pixel gialli
     },
     'blue': {
-        # Blu: S_min abbassato a 45, V_min a 25 per blu scuri.
         'lower': np.array([85,  45,  25]),
         'upper': np.array([135, 255, 255]),
         'bgr': (255, 0, 0),
         'rgb': (0, 0, 255),
+        'min_ratio': 0.04,
     },
 }
 
@@ -97,7 +98,7 @@ COLOR_RANGES = {
 # MIRINO — PARAMETRI
 # ============================================================
 CROSSHAIR_HALF  = None      # None = intero frame webcam (calcolato a runtime)
-MIN_COLOR_RATIO = 0.04      # almeno 4% dei pixel nel mirino
+MIN_COLOR_RATIO = 0.04      # soglia globale (sovrascritta da 'min_ratio' per colore)
 
 # ── Velocity → FISH_SPEED mapping ──
 FISH_SPEED_MIN  = 1
@@ -145,7 +146,8 @@ def draw_fish(matrix, cx, cy, body_color, facing_right=True):
 # RILEVAMENTO COLORE NEL MIRINO
 # ============================================================
 def detect_color(hsv_roi):
-    """Ritorna (color_name, ratio) oppure (None, 0.0)."""
+    """Ritorna (color_name, ratio) oppure (None, 0.0).
+    Usa 'min_ratio' per-colore se presente, altrimenti MIN_COLOR_RATIO globale."""
     total = hsv_roi.shape[0] * hsv_roi.shape[1]
     if total == 0:
         return None, 0.0
@@ -154,6 +156,7 @@ def detect_color(hsv_roi):
     best_ratio = 0.0
 
     for name, params in COLOR_RANGES.items():
+        threshold = params.get('min_ratio', MIN_COLOR_RATIO)
         if name == 'red':
             m = cv2.bitwise_or(
                 cv2.inRange(hsv_roi, params['lower1'], params['upper1']),
@@ -162,13 +165,11 @@ def detect_color(hsv_roi):
             m = cv2.inRange(hsv_roi, params['lower'], params['upper'])
 
         ratio = cv2.countNonZero(m) / total
-        if ratio > best_ratio:
+        if ratio >= threshold and ratio > best_ratio:
             best_ratio = ratio
             best_name  = name
 
-    if best_ratio >= MIN_COLOR_RATIO:
-        return best_name, best_ratio
-    return None, 0.0
+    return best_name, best_ratio
 
 
 # ============================================================
