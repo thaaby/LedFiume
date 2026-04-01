@@ -10,6 +10,9 @@ import numpy as np
 import time
 import os
 import glob
+import signal
+import sys
+import threading
 
 try:
     import serial
@@ -18,6 +21,13 @@ except ImportError:
     HAS_SERIAL = False
     print("[!] pyserial non installato (pip install pyserial)")
 
+try:
+    import sounddevice as sd
+    HAS_SOUND = True
+except ImportError:
+    HAS_SOUND = False
+    print("[!] sounddevice non installato (pip install sounddevice)")
+
 # ============================================================
 # CONFIGURAZIONE ARDUINO (SERIALE)
 # ============================================================
@@ -25,17 +35,103 @@ ARDUINO_ENABLED            = True
 ARDUINO_PORT               = "auto"
 ARDUINO_BAUD               = 500000
 ARDUINO_ROWS               = 32
-ARDUINO_COLS               = 56          # 7 pannelli × 8 LED = 56 colonne totali
+ARDUINO_COLS               = 56
 ARDUINO_PANEL_W            = 8
 ARDUINO_PANEL_H            = 32
 ARDUINO_PANELS_COUNT       = 7
-ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]  # ordine fisico da destra a sinistra
+ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]
 ARDUINO_PANEL_START_BOTTOM = [False] * 7
 ARDUINO_SERPENTINE_X       = True
 
 GAMMA       = 2.5
 gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
                         for i in np.arange(0, 256)]).astype("uint8")
+
+# ============================================================
+# SUONI POLIFONICI (campanella / glockenspiel)
+# ============================================================
+SOUND_SAMPLE_RATE = 44100
+SOUND_DURATION    = 0.8
+
+def _generate_chime(freq, duration=SOUND_DURATION, sr=SOUND_SAMPLE_RATE):
+    """Genera un tono tipo campanella con armoniche e decay esponenziale."""
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    wave  = np.sin(2 * np.pi * freq * t)
+    wave += 0.3  * np.sin(2 * np.pi * freq * 2 * t)
+    wave += 0.1  * np.sin(2 * np.pi * freq * 3 * t)
+    wave += 0.05 * np.sin(2 * np.pi * freq * 5 * t)
+    attack = np.minimum(t / 0.005, 1.0)
+    decay  = np.exp(-t * 4.0)
+    envelope = attack * decay
+    wave *= envelope
+    wave = 0.5 * wave / np.max(np.abs(wave))
+    return wave.astype(np.float32)
+
+# ── Mixer polifonico ──
+COLOR_CHIMES = {}
+_active_voices = []
+_voices_lock = threading.Lock()
+_audio_stream = None
+
+def _audio_callback(outdata, frames, time_info, status):
+    """Callback audio: mixa tutte le voci attive insieme."""
+    mixed = np.zeros(frames, dtype=np.float32)
+    with _voices_lock:
+        still_active = []
+        for voice in _active_voices:
+            pos = voice['position']
+            samples = voice['samples']
+            remaining = len(samples) - pos
+            if remaining <= 0:
+                continue
+            n = min(frames, remaining)
+            mixed[:n] += samples[pos:pos + n]
+            voice['position'] = pos + n
+            if voice['position'] < len(samples):
+                still_active.append(voice)
+        _active_voices[:] = still_active
+    np.clip(mixed, -0.9, 0.9, out=mixed)
+    outdata[:, 0] = mixed
+
+def _init_audio():
+    """Avvia lo stream audio polifonico."""
+    global _audio_stream
+    if not HAS_SOUND:
+        return
+    try:
+        _audio_stream = sd.OutputStream(
+            samplerate=SOUND_SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            callback=_audio_callback,
+            blocksize=1024,
+        )
+        _audio_stream.start()
+        print("[OK] Audio polifonico avviato")
+    except Exception as e:
+        print(f"[!] Errore audio: {e}")
+
+if HAS_SOUND:
+    COLOR_CHIMES = {
+        'red':    _generate_chime(523.25),
+        'blue':   _generate_chime(659.25),
+        'yellow': _generate_chime(783.99),
+    }
+    print(f"[OK] Suoni generati: C5 (rosso), E5 (blu), G5 (giallo)")
+    _init_audio()
+
+def play_color_sound(color_name):
+    """Aggiunge una voce al mixer."""
+    try:
+        if not HAS_SOUND or color_name not in COLOR_CHIMES:
+            return
+        with _voices_lock:
+            _active_voices.append({
+                'samples': COLOR_CHIMES[color_name],
+                'position': 0,
+            })
+    except Exception:
+        pass
 
 # ============================================================
 # PRE-COMPUTAZIONE MATRICE LED
@@ -64,50 +160,78 @@ def precompute_led_mapping():
 LED_MAP_Y, LED_MAP_X = precompute_led_mapping()
 
 # ============================================================
-# COLORI DA RILEVARE (HSV)
+# COLORI DA RILEVARE (HSV) — CALIBRATI PER LE TUE BIGLIE
 # ============================================================
+# Pallina rossa #a90729 → #810116:
+#   H: 168-176 (verso magenta/rosa), S: 200-255 (MOLTO satura), V: 70-180 (scura)
+# Tubo #b33e3c → #ce5065:
+#   H: 0-8 e 350-360, S: 130-180 (meno saturo), V: 150-220 (più chiaro)
+#
+# La pallina si distingue per:
+#   - Hue DIVERSO (168-176 vs 0-8) → quasi magenta, non arancio
+#   - Saturazione ALTA (S > 200)
+#   - Value BASSO (V < 180) → più scura
+
+TUBE_EXCLUDE = {
+    'lower1': np.array([0,   100, 130]),
+    'upper1': np.array([10,  190, 230]),
+    'lower2': np.array([165, 100, 130]),
+    'upper2': np.array([172, 190, 230]),
+}
+
 COLOR_RANGES = {
     'red': {
-        'lower1': np.array([0,   120, 60]),
-        'upper1': np.array([3,   255, 255]),
-        'lower2': np.array([177, 120, 60]),
-        'upper2': np.array([180, 255, 255]),
+        # PALLINA ROSSA SCURA: #a90729 → #810116
+        # Hue 168-180 (magenta-rosso), Saturazione ALTA (>200), Value BASSO (<180)
+        # Questo ESCLUDE il tubo che è H 0-8, S 130-180, V 150-220
+        'lower1': np.array([0,   200, 50]),    # rosso puro molto saturo e scuro
+        'upper1': np.array([5,   255, 180]),
+        'lower2': np.array([165, 200, 50]),    # magenta-rosso molto saturo e scuro
+        'upper2': np.array([180, 255, 180]),
         'bgr': (0, 0, 255),
         'rgb': (255, 0, 0),
-        'min_ratio': 0.04,
+        'min_ratio': 0.02,
+        'min_motion_pixels': 200,
+        'exclude_tube': True,
     },
     'yellow': {
-        # Giallo: range Hue esteso (18-55), saturazione minima molto bassa (20)
-        # perché le biglie gialle sotto luce artificiale appaiono quasi pastello.
-        'lower': np.array([18,  20,  25]),
+        'lower': np.array([18,  15,  25]),
         'upper': np.array([55,  255, 255]),
         'bgr': (0, 255, 255),
         'rgb': (255, 255, 0),
-        'min_ratio': 0.02,   # soglia più bassa: basta 2% di pixel gialli
+        'min_ratio': 0.015,
+        'min_motion_pixels': 0,
+        'exclude_tube': False,
     },
     'blue': {
-        'lower': np.array([85,  45,  25]),
+        'lower': np.array([85,  35,  25]),
         'upper': np.array([135, 255, 255]),
         'bgr': (255, 0, 0),
         'rgb': (0, 0, 255),
-        'min_ratio': 0.04,
+        'min_ratio': 0.03,
+        'min_motion_pixels': 0,
+        'exclude_tube': False,
     },
 }
 
 # ============================================================
 # MIRINO — PARAMETRI
 # ============================================================
-CROSSHAIR_HALF  = None      # None = intero frame webcam (calcolato a runtime)
-MIN_COLOR_RATIO = 0.04      # soglia globale (sovrascritta da 'min_ratio' per colore)
+CROSSHAIR_HALF  = None
+MIN_COLOR_RATIO = 0.03
 
-# ── Velocity → FISH_SPEED mapping ──
-FISH_SPEED_MIN  = 1
-FISH_SPEED_MAX  = 8
-VEL_PIX_MIN     = 2         # px/frame sotto cui la biglia è considerata ferma
-VEL_PIX_MAX     = 40        # px/frame oltre cui si usa la velocità massima
+ANIM_FPS            = 30
+FISH_SPEED_PPS_MIN  = 20
+FISH_SPEED_PPS_MAX  = 80
+VEL_PXS_MIN         = 60
+VEL_PXS_MAX         = 600
+
+BG_WARMUP_FRAMES    = 30
+BG_LEARN_ALPHA      = 0.001
+BG_DIFF_THRESHOLD   = 30
 
 # ============================================================
-# SPRITE PESCE (da pixilart-drawing.png)
+# SPRITE PESCE
 # ============================================================
 _FISH_BODY_COLORS = {(255, 126, 0), (237, 28, 36)}
 _FISH_PIXELS: list = []
@@ -132,7 +256,6 @@ _load_fish_sprite()
 
 
 def draw_fish(matrix, cx, cy, body_color, facing_right=True):
-    """Disegna il pesce sulla matrice LED. body_color = RGB tuple."""
     rows, cols = matrix.shape[:2]
     s = 1 if facing_right else -1
     for dy, dx, color in _FISH_PIXELS:
@@ -143,27 +266,41 @@ def draw_fish(matrix, cx, cy, body_color, facing_right=True):
 
 
 # ============================================================
-# RILEVAMENTO COLORE NEL MIRINO
+# RILEVAMENTO COLORE
 # ============================================================
-def detect_colors(hsv_roi):
-    """Ritorna una lista di (color_name, ratio) per TUTTI i colori sopra soglia.
-    Permette il rilevamento simultaneo di più biglie di colori diversi."""
-    total = hsv_roi.shape[0] * hsv_roi.shape[1]
-    if total == 0:
+def create_tube_mask(hsv_roi):
+    m1 = cv2.inRange(hsv_roi, TUBE_EXCLUDE['lower1'], TUBE_EXCLUDE['upper1'])
+    m2 = cv2.inRange(hsv_roi, TUBE_EXCLUDE['lower2'], TUBE_EXCLUDE['upper2'])
+    return cv2.bitwise_or(m1, m2)
+
+
+def detect_colors_on_mask(hsv_roi, motion_mask, tube_mask=None):
+    motion_pixels = cv2.countNonZero(motion_mask)
+    if motion_pixels < 50:
         return []
+
+    hsv_masked = cv2.bitwise_and(hsv_roi, hsv_roi, mask=motion_mask)
 
     found = []
     for name, params in COLOR_RANGES.items():
-        threshold = params.get('min_ratio', MIN_COLOR_RATIO)
-        if name == 'red':
-            m = cv2.bitwise_or(
-                cv2.inRange(hsv_roi, params['lower1'], params['upper1']),
-                cv2.inRange(hsv_roi, params['lower2'], params['upper2']))
-        else:
-            m = cv2.inRange(hsv_roi, params['lower'], params['upper'])
+        min_motion = params.get('min_motion_pixels', 0)
+        if motion_pixels < min_motion:
+            continue
 
-        ratio = cv2.countNonZero(m) / total
-        if ratio >= threshold:
+        if name == 'red':
+            color_mask = cv2.bitwise_or(
+                cv2.inRange(hsv_masked, params['lower1'], params['upper1']),
+                cv2.inRange(hsv_masked, params['lower2'], params['upper2']))
+            if params.get('exclude_tube', False) and tube_mask is not None:
+                color_mask = cv2.bitwise_and(color_mask, cv2.bitwise_not(tube_mask))
+        else:
+            color_mask = cv2.inRange(hsv_masked, params['lower'], params['upper'])
+
+        threshold = params.get('min_ratio', MIN_COLOR_RATIO)
+        color_pixels = cv2.countNonZero(color_mask)
+        ratio = color_pixels / max(motion_pixels, 1)
+
+        if ratio >= threshold and color_pixels > 20:
             found.append((name, ratio))
 
     return found
@@ -199,28 +336,43 @@ def create_arduino_serial():
 
 
 MAGIC_HEADER  = bytes([0xFF, 0x4C, 0x45])
-_serial_busy  = False   # True dopo aver inviato, attendiamo ACK prima del prossimo invio
+_serial_busy  = False
 
 def send_matrix_state(ser, matrix_rgb):
-    """Invio non-bloccante con handshake leggero.
-    - Ogni volta controlla se Arduino ha risposto (byte 'K' nel buffer RX).
-    - Solo se libero, invia il prossimo frame.
-    - Non blocca MAI il loop principale: se Arduino è ancora occupato, si salta
-      il frame seriale (l'animazione continua comunque a scorrere a 30fps)."""
     global _serial_busy
     if ser is None:
         return
-    # Controlla risposta Arduino (non bloccante)
-    if ser.in_waiting > 0:
-        resp = ser.read_all()
-        if b'K' in resp or b'O' in resp:   # 'K' o 'OK' comuni nei firmware
-            _serial_busy = False
-    if _serial_busy:
-        return   # Arduino ancora impegnato → saltiamo questo invio
-    rgb_gamma     = gamma_table[matrix_rgb]
-    mapped_pixels = rgb_gamma[LED_MAP_Y, LED_MAP_X]
-    ser.write(MAGIC_HEADER + mapped_pixels.tobytes())
-    _serial_busy  = True
+    try:
+        if ser.in_waiting > 0:
+            resp = ser.read_all()
+            if b'K' in resp or b'O' in resp:
+                _serial_busy = False
+        if _serial_busy:
+            return
+        rgb_gamma     = gamma_table[matrix_rgb]
+        mapped_pixels = rgb_gamma[LED_MAP_Y, LED_MAP_X]
+        ser.write(MAGIC_HEADER + mapped_pixels.tobytes())
+        _serial_busy  = True
+    except Exception as e:
+        print(f"[!] Errore seriale: {e}")
+        _serial_busy = False
+
+
+def send_black_and_close(ser):
+    if ser is None:
+        return
+    try:
+        black  = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
+        mapped = gamma_table[black][LED_MAP_Y, LED_MAP_X]
+        ser.write(MAGIC_HEADER + mapped.tobytes())
+        time.sleep(0.1)
+        ser.close()
+        print("[OK] LED spenti. Connessione chiusa.")
+    except Exception:
+        try:
+            ser.close()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -233,6 +385,7 @@ def main():
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[!] Errore apertura webcam")
+        send_black_and_close(ser)
         return
 
     cap.set(cv2.CAP_PROP_FOURCC,         cv2.VideoWriter_fourcc(*'MJPG'))
@@ -240,215 +393,280 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT,   480)
     cap.set(cv2.CAP_PROP_FPS,            60)
 
-    # ── Multipesce: lista di pesci attivi ──
-    # Ogni pesce è un dict: {color_name, x, y, speed, facing_right}
-    active_fish   = []
-    COOLDOWN_FRAMES = 20
-    cooldowns     = {name: 0 for name in COLOR_RANGES}  # cooldown per-colore
+    def signal_handler(sig, frame_info):
+        print("\n[INFO] CTRL+C ricevuto, pulizia...")
+        send_black_and_close(ser)
+        cap.release()
+        cv2.destroyAllWindows()
+        if _audio_stream is not None:
+            _audio_stream.close()
+        sys.exit(0)
+    signal.signal(signal.SIGINT, signal_handler)
 
-    # ── Tracking velocità e direzione biglia ──
+    print(f"[INFO] Cattura sfondo ({BG_WARMUP_FRAMES} frame)... NON muovere biglie!")
+    bg_accum = None
+    bg_count = 0
+    for _ in range(BG_WARMUP_FRAMES + 10):
+        ret, f = cap.read()
+        if not ret:
+            continue
+        f = cv2.flip(f, 1)
+        f_blur = cv2.GaussianBlur(f, (5, 5), 0).astype(np.float32)
+        if bg_accum is None:
+            bg_accum = f_blur
+            bg_count = 1
+        else:
+            bg_accum += f_blur
+            bg_count += 1
+    background = (bg_accum / bg_count).astype(np.uint8)
+    bg_float = background.astype(np.float32)
+    print(f"[OK] Sfondo catturato (media di {bg_count} frame)")
+
+    print("[INFO] Calcolo maschera tubo per esclusione rosso...")
+    bg_hsv = cv2.cvtColor(background, cv2.COLOR_BGR2HSV)
+    tube_mask_global = create_tube_mask(bg_hsv)
+    tube_pixels = cv2.countNonZero(tube_mask_global)
+    print(f"[OK] Tubo rilevato: {tube_pixels} pixel da escludere")
+
+    active_fish     = []
+    COOLDOWN_FRAMES = 20
+    cooldowns       = {name: 0 for name in COLOR_RANGES}
+
     prev_centroid       = None
     velocity_px         = 0.0
-    motion_facing_right = True   # direzione dedotta dal movimento del centroide
-    dx_history          = []     # finestra scorrevole dei dx recenti per smussare la direzione
-    DX_WINDOW           = 5      # quanti frame di storia usare
+    velocity_pxs        = 0.0
+    motion_facing_right = True
+    dx_history          = []
+    DX_WINDOW           = 5
 
-    # ── Controllo FPS loop ──
-    TARGET_FPS     = 30
-    frame_interval = 1.0 / TARGET_FPS
-    fps_t          = time.time()
-    last_frame_t   = time.time()
+    frame_interval = 1.0 / ANIM_FPS
+    last_frame_t   = time.time() - frame_interval
 
-    # crosshair_half calcolato a runtime (None = intero frame)
-    crosshair_half = CROSSHAIR_HALF  # sarà sovrascritto al primo frame
+    fps_history    = []
+    FPS_WINDOW     = 10
 
-    # ── Background subtractor: vede SOLO gli oggetti in movimento (biglie) ──
-    fgbg = cv2.createBackgroundSubtractorMOG2(history=200, varThreshold=30, detectShadows=False)
+    crosshair_half = CROSSHAIR_HALF
 
-    print("[INFO] Pronto! Punta il mirino sulle biglie.")
-    print("[INFO] Tasti: 'q' per uscire | '+' o '-' per ridimensionare il mirino | 'f' mirino a tutto schermo.")
+    print("[INFO] Pronto! Lancia le biglie.")
+    print("[INFO] Tasti: 'q' esci | '+'/'-' mirino | 'f' fullframe | 'b' ricalibra sfondo")
+    print("[INFO] Rosso calibrato per pallina scura #a90729-#810116 (esclude tubo)")
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = cv2.flip(frame, 1)
+    try:
+        while True:
+            loop_start   = time.time()
+            dt           = min(max(loop_start - last_frame_t, 1e-3), 0.1)
+            last_frame_t = loop_start
 
-        fh, fw = frame.shape[:2]
-        mid_x, mid_y = fw // 2, fh // 2
+            fps_history.append(1.0 / max(dt, 1e-6))
+            if len(fps_history) > FPS_WINDOW:
+                fps_history.pop(0)
+            fps_avg = sum(fps_history) / len(fps_history)
 
-        # Primo frame: imposta crosshair a tutto schermo se non ancora calcolato
-        if crosshair_half is None:
-            crosshair_half = min(fw // 2, fh // 2)
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.01)
+                continue
+            frame = cv2.flip(frame, 1)
 
-        # ── 1. ESTRAI ROI MIRINO ─────────────────────────────────────
-        x1 = max(0,  mid_x - crosshair_half)
-        y1 = max(0,  mid_y - crosshair_half)
-        x2 = min(fw, mid_x + crosshair_half)
-        y2 = min(fh, mid_y + crosshair_half)
+            fh, fw = frame.shape[:2]
+            mid_x, mid_y = fw // 2, fh // 2
 
-        roi_bgr = frame[y1:y2, x1:x2]
-        roi_hsv = cv2.cvtColor(cv2.medianBlur(roi_bgr, 3), cv2.COLOR_BGR2HSV)
-
-        # ── Maschera MOVIMENTO ────────────────────────────────────────
-        fgmask = fgbg.apply(roi_bgr)
-        kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        fgmask = cv2.erode(fgmask, kern, iterations=1)
-        fgmask = cv2.dilate(fgmask, kern, iterations=2)
-        roi_hsv_moving = cv2.bitwise_and(roi_hsv, roi_hsv, mask=fgmask)
-
-        detected_list = detect_colors(roi_hsv_moving)
-
-        # ── TRACKING VELOCITÀ BIGLIA ──────────────────────────────────
-        # Calcola il centroide dei pixel in movimento per misurare la velocità
-        moments = cv2.moments(fgmask)
-        if moments['m00'] > 100:   # abbastanza pixel per fidarci
-            cx_roi = int(moments['m10'] / moments['m00'])
-            cy_roi = int(moments['m01'] / moments['m00'])
-            curr_centroid = (cx_roi, cy_roi)
-            if prev_centroid is not None:
-                dx = curr_centroid[0] - prev_centroid[0]
-                dy = curr_centroid[1] - prev_centroid[1]
-                velocity_px = float(np.sqrt(dx*dx + dy*dy))
-                # Se il salto è enorme (δ > 120px) è probabilmente un cambio biglia:
-                # resettiamo la storia per non usare dx spuri
-                if velocity_px > 120:
-                    dx_history.clear()
-                else:
-                    # Aggiorna finestra scorrevole dx
-                    dx_history.append(dx)
-                    if len(dx_history) > DX_WINDOW:
-                        dx_history.pop(0)
-                    # Direzione = segno della media degli ultimi dx
-                    avg_dx = sum(dx_history) / len(dx_history)
-                    if abs(avg_dx) > 0.5:          # solo se c'è una tendenza chiara
-                        motion_facing_right = avg_dx > 0
-                    elif dy != 0:                  # fallback verticale
-                        motion_facing_right = dy < 0
-            prev_centroid = curr_centroid
-        else:
-            prev_centroid = None
-            velocity_px   = 0.0
-            dx_history.clear()   # nessun blob attivo → reset storia
-
-        # Mappa velocità in pixel/frame → fish_speed base
-        v_clamped  = max(float(VEL_PIX_MIN), min(velocity_px, float(VEL_PIX_MAX)))
-        v_norm     = (v_clamped - VEL_PIX_MIN) / (VEL_PIX_MAX - VEL_PIX_MIN)
-        base_speed = FISH_SPEED_MIN + v_norm * (FISH_SPEED_MAX - FISH_SPEED_MIN)
-
-        # ── 2. TRIGGER MULTIPESCE ────────────────────────────────────
-        for name in cooldowns:
-            if cooldowns[name] > 0:
-                cooldowns[name] -= 1
-
-        for color_name, ratio in detected_list:
-            if cooldowns[color_name] == 0:
-                facing = motion_facing_right   # segue la direzione della pallina
-                start_x = -8.0 if facing else float(ARDUINO_COLS + 8)
-                active_fish.append({
-                    'color_name':   color_name,
-                    'x':            start_x,
-                    'y':            ARDUINO_ROWS // 2,
-                    'speed':        base_speed,
-                    'facing_right': facing,
-                })
-                cooldowns[color_name] = COOLDOWN_FRAMES
-                dir_label = "→" if facing else "←"
-                print(f"[TRIGGER] {color_name.upper()} rilevato ({int(ratio*100)}%) "
-                      f"| vel={velocity_px:.1f}px/f speed={base_speed:.1f} "
-                      f"| dir={dir_label} pesci attivi={len(active_fish)}")
-
-        # ── 3. RENDER MATRICE LED (tutti i pesci) ────────────────────────
-        matrix = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
-
-        next_fish = []
-        for fish in active_fish:
-            fish_rgb = COLOR_RANGES[fish['color_name']]['rgb']
-            draw_fish(matrix, int(fish['x']), fish['y'], fish_rgb, fish['facing_right'])
-            fish['x'] += fish['speed'] if fish['facing_right'] else -fish['speed']
-            # Rimuovi il pesce solo quando esce completamente dallo schermo
-            if fish['facing_right'] and fish['x'] < ARDUINO_COLS + 10:
-                next_fish.append(fish)
-            elif not fish['facing_right'] and fish['x'] > -10:
-                next_fish.append(fish)
-        active_fish = next_fish
-
-        send_matrix_state(ser, matrix)
-
-        # ── Cap a TARGET_FPS per animazione fluida e costante ─────────────
-        now = time.time()
-        elapsed = now - last_frame_t
-        sleep_t = frame_interval - elapsed
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-        last_frame_t = time.time()
-
-        # ── 4. OVERLAY MIRINO SU WEBCAM ──────────────────────────────
-        cross_bgr = (80, 80, 80)
-        label = ""
-        if detected_list:
-            cross_bgr = COLOR_RANGES[detected_list[0][0]]['bgr']
-            label = "  ".join(f"{n.upper()} {int(r*100)}%" for n, r in detected_list)
-
-        # Rettangolo mirino
-        cv2.rectangle(frame, (x1, y1), (x2, y2), cross_bgr, 2)
-        # Croce centrale (con gap)
-        gap = 6
-        cv2.line(frame, (mid_x - 25, mid_y), (mid_x - gap, mid_y), cross_bgr, 1)
-        cv2.line(frame, (mid_x + gap, mid_y), (mid_x + 25, mid_y), cross_bgr, 1)
-        cv2.line(frame, (mid_x, mid_y - 25), (mid_x, mid_y - gap), cross_bgr, 1)
-        cv2.line(frame, (mid_x, mid_y + gap), (mid_x, mid_y + 25), cross_bgr, 1)
-        # Label colore
-        if label:
-            cv2.putText(frame, label, (x2 + 8, mid_y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, cross_bgr, 2)
-
-        # HSV live al centro del mirino (debug calibrazione)
-        center_h = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 0])
-        center_s = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 1])
-        center_v = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 2])
-        cv2.putText(frame, f"H:{center_h} S:{center_s} V:{center_v}",
-                    (x2 + 8, mid_y + 18),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 200, 200), 1)
-
-        # FPS + stato
-        now = time.time()
-        fps = 1.0 / max(now - fps_t, 1e-6)
-        fps_t = now
-        status = f"PESCI:{len(active_fish)}" if active_fish else "IDLE"
-        cv2.putText(frame, f"FPS:{int(fps)}  {status}",
-                    (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-
-        cv2.imshow("LedFiume - Mirino", frame)
-
-        # Anteprima matrice LED
-        preview     = cv2.resize(matrix, (560, 320), interpolation=cv2.INTER_NEAREST)
-        preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
-        cv2.imshow("LED Matrix", preview_bgr)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('+') or key == ord('='):
-            crosshair_half = min(int(crosshair_half) + 10, fw // 2, fh // 2)
-        elif key == ord('-'):
-            crosshair_half = max(crosshair_half - 10, 5)
-        elif key == ord('f'):
-            if crosshair_half >= min(fw // 2, fh // 2) - 10:
-                crosshair_half = 30
-            else:
+            if crosshair_half is None:
                 crosshair_half = min(fw // 2, fh // 2)
 
-    # ── CLEANUP ──
-    cap.release()
-    cv2.destroyAllWindows()
-    if ser:
-        black  = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
-        mapped = gamma_table[black][LED_MAP_Y, LED_MAP_X]
-        ser.write(MAGIC_HEADER + mapped.tobytes())
-        time.sleep(0.1)
-        ser.close()
-        print("[OK] LED spenti. Connessione chiusa.")
+            x1 = max(0,  mid_x - crosshair_half)
+            y1 = max(0,  mid_y - crosshair_half)
+            x2 = min(fw, mid_x + crosshair_half)
+            y2 = min(fh, mid_y + crosshair_half)
+
+            roi_bgr = frame[y1:y2, x1:x2]
+            roi_bg  = background[y1:y2, x1:x2]
+
+            diff = cv2.absdiff(roi_bgr, roi_bg)
+            diff_gray = np.max(diff, axis=2)
+            _, fgmask = cv2.threshold(diff_gray, BG_DIFF_THRESHOLD, 255, cv2.THRESH_BINARY)
+            fgmask = fgmask.astype(np.uint8)
+
+            kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            fgmask = cv2.erode(fgmask, kern, iterations=1)
+            fgmask = cv2.dilate(fgmask, kern, iterations=3)
+
+            no_motion = cv2.bitwise_not(fgmask)
+            frame_blur = cv2.GaussianBlur(frame, (5, 5), 0).astype(np.float32)
+            mask_3ch = np.stack([no_motion, no_motion, no_motion], axis=2).astype(np.float32) / 255.0
+            roi_frame_f = frame_blur[y1:y2, x1:x2]
+            roi_bg_f    = bg_float[y1:y2, x1:x2]
+            roi_mask    = mask_3ch
+            bg_float[y1:y2, x1:x2] = roi_bg_f * (1 - BG_LEARN_ALPHA * roi_mask) + \
+                                       roi_frame_f * (BG_LEARN_ALPHA * roi_mask)
+            background[y1:y2, x1:x2] = bg_float[y1:y2, x1:x2].astype(np.uint8)
+
+            roi_hsv = cv2.cvtColor(cv2.medianBlur(roi_bgr, 3), cv2.COLOR_BGR2HSV)
+            tube_mask_roi = tube_mask_global[y1:y2, x1:x2]
+            detected_list = detect_colors_on_mask(roi_hsv, fgmask, tube_mask_roi)
+
+            moments = cv2.moments(fgmask)
+            if moments['m00'] > 100:
+                cx_roi = int(moments['m10'] / moments['m00'])
+                cy_roi = int(moments['m01'] / moments['m00'])
+                curr_centroid = (cx_roi, cy_roi)
+                if prev_centroid is not None:
+                    dx = curr_centroid[0] - prev_centroid[0]
+                    dy = curr_centroid[1] - prev_centroid[1]
+                    velocity_px = float(np.sqrt(dx*dx + dy*dy))
+                    if velocity_px > 120:
+                        dx_history.clear()
+                    else:
+                        dx_history.append(dx)
+                        if len(dx_history) > DX_WINDOW:
+                            dx_history.pop(0)
+                        avg_dx = sum(dx_history) / len(dx_history)
+                        if abs(avg_dx) > 0.5:
+                            motion_facing_right = avg_dx > 0
+                prev_centroid = curr_centroid
+            else:
+                prev_centroid = None
+                velocity_px   = 0.0
+                dx_history.clear()
+
+            velocity_pxs = velocity_px / dt
+            v_clamped    = max(VEL_PXS_MIN, min(velocity_pxs, VEL_PXS_MAX))
+            v_norm       = (v_clamped - VEL_PXS_MIN) / (VEL_PXS_MAX - VEL_PXS_MIN)
+            speed_pps    = FISH_SPEED_PPS_MIN + v_norm * (FISH_SPEED_PPS_MAX - FISH_SPEED_PPS_MIN)
+
+            for name in cooldowns:
+                if cooldowns[name] > 0:
+                    cooldowns[name] -= 1
+
+            for color_name, ratio in detected_list:
+                if cooldowns[color_name] == 0:
+                    facing = motion_facing_right
+                    start_x = -8.0 if facing else float(ARDUINO_COLS + 8)
+                    active_fish.append({
+                        'color_name':   color_name,
+                        'x':            start_x,
+                        'y':            ARDUINO_ROWS // 2,
+                        'speed_pps':    speed_pps,
+                        'facing_right': facing,
+                    })
+                    cooldowns[color_name] = COOLDOWN_FRAMES
+                    play_color_sound(color_name)
+                    dir_label = "→" if facing else "←"
+                    print(f"[TRIGGER] {color_name.upper()} ({int(ratio*100)}%) "
+                          f"| vel={velocity_pxs:.0f}px/s fish={speed_pps:.0f}px/s "
+                          f"| dir={dir_label} pesci={len(active_fish)}")
+
+            matrix = np.zeros((ARDUINO_ROWS, ARDUINO_COLS, 3), dtype=np.uint8)
+
+            next_fish = []
+            for fish in active_fish:
+                fish_rgb = COLOR_RANGES[fish['color_name']]['rgb']
+                draw_fish(matrix, int(fish['x']), fish['y'],
+                          fish_rgb, fish['facing_right'])
+                if fish['facing_right']:
+                    fish['x'] += fish['speed_pps'] * dt
+                else:
+                    fish['x'] -= fish['speed_pps'] * dt
+                if fish['facing_right'] and fish['x'] < ARDUINO_COLS + 10:
+                    next_fish.append(fish)
+                elif not fish['facing_right'] and fish['x'] > -10:
+                    next_fish.append(fish)
+            active_fish = next_fish
+
+            send_matrix_state(ser, matrix)
+
+            elapsed = time.time() - loop_start
+            sleep_t = frame_interval - elapsed
+            if sleep_t > 0:
+                time.sleep(sleep_t)
+
+            cross_bgr = (80, 80, 80)
+            label = ""
+            if detected_list:
+                cross_bgr = COLOR_RANGES[detected_list[0][0]]['bgr']
+                label = "  ".join(
+                    f"{n.upper()} {int(r*100)}%" for n, r in detected_list)
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), cross_bgr, 2)
+            gap = 6
+            cv2.line(frame, (mid_x - 25, mid_y), (mid_x - gap, mid_y), cross_bgr, 1)
+            cv2.line(frame, (mid_x + gap, mid_y), (mid_x + 25, mid_y), cross_bgr, 1)
+            cv2.line(frame, (mid_x, mid_y - 25), (mid_x, mid_y - gap), cross_bgr, 1)
+            cv2.line(frame, (mid_x, mid_y + gap), (mid_x, mid_y + 25), cross_bgr, 1)
+            if label:
+                cv2.putText(frame, label, (x2 + 8, mid_y - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, cross_bgr, 2)
+
+            center_h = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 0])
+            center_s = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 1])
+            center_v = int(roi_hsv[roi_hsv.shape[0]//2, roi_hsv.shape[1]//2, 2])
+            cv2.putText(frame, f"H:{center_h} S:{center_s} V:{center_v}",
+                        (x2 + 8, mid_y + 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 200, 200), 1)
+
+            motion_pix = cv2.countNonZero(fgmask)
+            status = f"PESCI:{len(active_fish)}" if active_fish else "IDLE"
+            cv2.putText(frame, f"FPS:{int(fps_avg)}  {status}  MOT:{motion_pix}",
+                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+            cv2.imshow("LedFiume - Mirino", frame)
+
+            preview     = cv2.resize(matrix, (560, 320),
+                                     interpolation=cv2.INTER_NEAREST)
+            preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
+            cv2.imshow("LED Matrix", preview_bgr)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('q'):
+                break
+            elif key == ord('+') or key == ord('='):
+                crosshair_half = min(
+                    int(crosshair_half) + 10, fw // 2, fh // 2)
+            elif key == ord('-'):
+                crosshair_half = max(crosshair_half - 10, 5)
+            elif key == ord('f'):
+                if crosshair_half >= min(fw // 2, fh // 2) - 10:
+                    crosshair_half = 30
+                else:
+                    crosshair_half = min(fw // 2, fh // 2)
+            elif key == ord('b'):
+                print("[INFO] Ricalibrazione sfondo...")
+                bg_accum = None
+                bg_count = 0
+                for _ in range(BG_WARMUP_FRAMES):
+                    ret2, f2 = cap.read()
+                    if not ret2:
+                        continue
+                    f2 = cv2.flip(f2, 1)
+                    f2_blur = cv2.GaussianBlur(f2, (5, 5), 0).astype(np.float32)
+                    if bg_accum is None:
+                        bg_accum = f2_blur
+                        bg_count = 1
+                    else:
+                        bg_accum += f2_blur
+                        bg_count += 1
+                background = (bg_accum / bg_count).astype(np.uint8)
+                bg_float = background.astype(np.float32)
+                bg_hsv = cv2.cvtColor(background, cv2.COLOR_BGR2HSV)
+                tube_mask_global = create_tube_mask(bg_hsv)
+                tube_pixels = cv2.countNonZero(tube_mask_global)
+                print(f"[OK] Sfondo ricalibrato ({bg_count} frame), tubo: {tube_pixels} px")
+
+    except Exception as e:
+        print(f"\n[!!!] ERRORE: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        print("[INFO] Pulizia in corso...")
+        cap.release()
+        cv2.destroyAllWindows()
+        send_black_and_close(ser)
+        if _audio_stream is not None:
+            try:
+                _audio_stream.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
