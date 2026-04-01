@@ -12,7 +12,6 @@ import os
 import glob
 import signal
 import sys
-import threading
 
 try:
     import serial
@@ -22,11 +21,13 @@ except ImportError:
     print("[!] pyserial non installato (pip install pyserial)")
 
 try:
-    import sounddevice as sd
-    HAS_SOUND = True
+    import pygame
+    HAS_PYGAME = True
 except ImportError:
-    HAS_SOUND = False
-    print("[!] sounddevice non installato (pip install sounddevice)")
+    HAS_PYGAME = False
+    print("[!] pygame non installato (pip install pygame)")
+
+HAS_SOUND = False   # aggiornato in main() dopo init mixer
 
 # ============================================================
 # CONFIGURAZIONE ARDUINO (SERIALE)
@@ -48,90 +49,53 @@ gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
                         for i in np.arange(0, 256)]).astype("uint8")
 
 # ============================================================
-# SUONI POLIFONICI (campanella / glockenspiel)
+# SUONI (pygame.mixer — polifonico, non-bloccante)
 # ============================================================
-SOUND_SAMPLE_RATE = 44100
-SOUND_DURATION    = 0.8
+_AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio')
+_AUDIO_FILES = {
+    'red':    os.path.join(_AUDIO_DIR, 'C.mp3'),
+    'blue':   os.path.join(_AUDIO_DIR, 'E.mp3'),
+    'yellow': os.path.join(_AUDIO_DIR, 'G.mp3'),
+}
+_FALLBACK_FREQS = {'red': 523.25, 'blue': 659.25, 'yellow': 783.99}
 
-def _generate_chime(freq, duration=SOUND_DURATION, sr=SOUND_SAMPLE_RATE):
-    """Genera un tono tipo campanella con armoniche e decay esponenziale."""
-    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
-    wave  = np.sin(2 * np.pi * freq * t)
-    wave += 0.3  * np.sin(2 * np.pi * freq * 2 * t)
-    wave += 0.1  * np.sin(2 * np.pi * freq * 3 * t)
-    wave += 0.05 * np.sin(2 * np.pi * freq * 5 * t)
-    attack = np.minimum(t / 0.005, 1.0)
-    decay  = np.exp(-t * 4.0)
-    envelope = attack * decay
-    wave *= envelope
-    wave = 0.5 * wave / np.max(np.abs(wave))
-    return wave.astype(np.float32)
+COLOR_SOUNDS: dict = {}
 
-# ── Mixer polifonico ──
-COLOR_CHIMES = {}
-_active_voices = []
-_voices_lock = threading.Lock()
-_audio_stream = None
-
-def _audio_callback(outdata, frames, time_info, status):
-    """Callback audio: mixa tutte le voci attive insieme."""
-    mixed = np.zeros(frames, dtype=np.float32)
-    with _voices_lock:
-        still_active = []
-        for voice in _active_voices:
-            pos = voice['position']
-            samples = voice['samples']
-            remaining = len(samples) - pos
-            if remaining <= 0:
-                continue
-            n = min(frames, remaining)
-            mixed[:n] += samples[pos:pos + n]
-            voice['position'] = pos + n
-            if voice['position'] < len(samples):
-                still_active.append(voice)
-        _active_voices[:] = still_active
-    np.clip(mixed, -0.9, 0.9, out=mixed)
-    outdata[:, 0] = mixed
+def _make_chime_sound(freq: float, duration: float = 0.8, sr: int = 44100):
+    """Campanella sintetica come fallback se i file MP3 non sono disponibili."""
+    t    = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    wave = (np.sin(2*np.pi*freq*t)
+            + 0.3  * np.sin(2*np.pi*freq*2*t)
+            + 0.1  * np.sin(2*np.pi*freq*3*t)
+            + 0.05 * np.sin(2*np.pi*freq*5*t))
+    wave *= np.minimum(t / 0.005, 1.0) * np.exp(-t * 4.0)
+    wave  = 0.5 * wave / np.max(np.abs(wave))
+    i16   = (wave * 32767).astype(np.int16)
+    stereo = np.column_stack([i16, i16])          # pygame vuole stereo
+    return pygame.sndarray.make_sound(stereo)
 
 def _init_audio():
-    """Avvia lo stream audio polifonico."""
-    global _audio_stream
     if not HAS_SOUND:
         return
-    try:
-        _audio_stream = sd.OutputStream(
-            samplerate=SOUND_SAMPLE_RATE,
-            channels=1,
-            dtype='float32',
-            callback=_audio_callback,
-            blocksize=1024,
-        )
-        _audio_stream.start()
-        print("[OK] Audio polifonico avviato")
-    except Exception as e:
-        print(f"[!] Errore audio: {e}")
+    pygame.mixer.set_num_channels(16)
+    for color, path in _AUDIO_FILES.items():
+        if os.path.exists(path):
+            try:
+                snd = pygame.mixer.Sound(path)
+                snd.set_volume(0.8)
+                COLOR_SOUNDS[color] = snd
+                print(f"[OK] Audio: {os.path.basename(path)}")
+                continue
+            except Exception as e:
+                print(f"[WARN] {os.path.basename(path)}: {e} — campanella sintetica")
+        snd = _make_chime_sound(_FALLBACK_FREQS[color])
+        snd.set_volume(0.8)
+        COLOR_SOUNDS[color] = snd
+        print(f"[OK] Audio sintetico: {color}")
 
-if HAS_SOUND:
-    COLOR_CHIMES = {
-        'red':    _generate_chime(523.25),
-        'blue':   _generate_chime(659.25),
-        'yellow': _generate_chime(783.99),
-    }
-    print(f"[OK] Suoni generati: C5 (rosso), E5 (blu), G5 (giallo)")
-    _init_audio()
-
-def play_color_sound(color_name):
-    """Aggiunge una voce al mixer."""
-    try:
-        if not HAS_SOUND or color_name not in COLOR_CHIMES:
-            return
-        with _voices_lock:
-            _active_voices.append({
-                'samples': COLOR_CHIMES[color_name],
-                'position': 0,
-            })
-    except Exception:
-        pass
+def play_color_sound(color_name: str):
+    if HAS_SOUND and color_name in COLOR_SOUNDS:
+        COLOR_SOUNDS[color_name].play()
 
 # ============================================================
 # PRE-COMPUTAZIONE MATRICE LED
@@ -160,18 +124,8 @@ def precompute_led_mapping():
 LED_MAP_Y, LED_MAP_X = precompute_led_mapping()
 
 # ============================================================
-# COLORI DA RILEVARE (HSV) — CALIBRATI PER LE TUE BIGLIE
+# COLORI DA RILEVARE (HSV)
 # ============================================================
-# Pallina rossa #a90729 → #810116:
-#   H: 168-176 (verso magenta/rosa), S: 200-255 (MOLTO satura), V: 70-180 (scura)
-# Tubo #b33e3c → #ce5065:
-#   H: 0-8 e 350-360, S: 130-180 (meno saturo), V: 150-220 (più chiaro)
-#
-# La pallina si distingue per:
-#   - Hue DIVERSO (168-176 vs 0-8) → quasi magenta, non arancio
-#   - Saturazione ALTA (S > 200)
-#   - Value BASSO (V < 180) → più scura
-
 TUBE_EXCLUDE = {
     'lower1': np.array([0,   100, 130]),
     'upper1': np.array([10,  190, 230]),
@@ -181,12 +135,9 @@ TUBE_EXCLUDE = {
 
 COLOR_RANGES = {
     'red': {
-        # PALLINA ROSSA SCURA: #a90729 → #810116
-        # Hue 168-180 (magenta-rosso), Saturazione ALTA (>200), Value BASSO (<180)
-        # Questo ESCLUDE il tubo che è H 0-8, S 130-180, V 150-220
-        'lower1': np.array([0,   200, 50]),    # rosso puro molto saturo e scuro
+        'lower1': np.array([0,   200, 50]),
         'upper1': np.array([5,   255, 180]),
-        'lower2': np.array([165, 200, 50]),    # magenta-rosso molto saturo e scuro
+        'lower2': np.array([165, 200, 50]),
         'upper2': np.array([180, 255, 180]),
         'bgr': (0, 0, 255),
         'rgb': (255, 0, 0),
@@ -215,7 +166,7 @@ COLOR_RANGES = {
 }
 
 # ============================================================
-# MIRINO — PARAMETRI
+# PARAMETRI ANIMAZIONE
 # ============================================================
 CROSSHAIR_HALF  = None
 MIN_COLOR_RATIO = 0.03
@@ -256,6 +207,7 @@ _load_fish_sprite()
 
 
 def draw_fish(matrix, cx, cy, body_color, facing_right=True):
+    """Disegna il pesce sulla matrice LED. body_color = RGB tuple."""
     rows, cols = matrix.shape[:2]
     s = 1 if facing_right else -1
     for dy, dx, color in _FISH_PIXELS:
@@ -379,7 +331,20 @@ def send_black_and_close(ser):
 # MAIN
 # ============================================================
 def main():
+    global HAS_SOUND
     print("=== LEDFIUME — MIRINO CENTRALE ===")
+
+    # ── Init audio (qui, non a livello modulo, per non bloccare l'avvio) ──
+    if HAS_PYGAME:
+        try:
+            pygame.mixer.pre_init(44100, -16, 2, 512)
+            pygame.mixer.init()
+            HAS_SOUND = True
+            _init_audio()
+        except Exception as e:
+            print(f"[!] Audio non disponibile: {e}")
+            HAS_SOUND = False
+
     ser = create_arduino_serial()
 
     cap = cv2.VideoCapture(0)
@@ -398,8 +363,8 @@ def main():
         send_black_and_close(ser)
         cap.release()
         cv2.destroyAllWindows()
-        if _audio_stream is not None:
-            _audio_stream.close()
+        if HAS_SOUND:
+            pygame.mixer.quit()
         sys.exit(0)
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -449,7 +414,6 @@ def main():
 
     print("[INFO] Pronto! Lancia le biglie.")
     print("[INFO] Tasti: 'q' esci | '+'/'-' mirino | 'f' fullframe | 'b' ricalibra sfondo")
-    print("[INFO] Rosso calibrato per pallina scura #a90729-#810116 (esclude tubo)")
 
     try:
         while True:
@@ -662,11 +626,8 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
         send_black_and_close(ser)
-        if _audio_stream is not None:
-            try:
-                _audio_stream.close()
-            except Exception:
-                pass
+        if HAS_SOUND:
+            pygame.mixer.quit()
 
 
 if __name__ == "__main__":
