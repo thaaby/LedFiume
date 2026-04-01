@@ -479,14 +479,13 @@ def main():
                     dy = curr_centroid[1] - prev_centroid[1]
                     velocity_px = float(np.sqrt(dx*dx + dy*dy))
                     if velocity_px > 120:
-                        dx_history.clear()
-                    else:
-                        dx_history.append(dx)
-                        if len(dx_history) > DX_WINDOW:
-                            dx_history.pop(0)
-                        avg_dx = sum(dx_history) / len(dx_history)
-                        if abs(avg_dx) > 0.5:
-                            motion_facing_right = avg_dx > 0
+                        dx_history.clear()   # salto anomalo: resetta storia
+                    dx_history.append(dx)    # aggiorna direzione in ogni caso
+                    if len(dx_history) > DX_WINDOW:
+                        dx_history.pop(0)
+                    avg_dx = sum(dx_history) / len(dx_history)
+                    if abs(avg_dx) > 0.5:
+                        motion_facing_right = avg_dx > 0
                 prev_centroid = curr_centroid
             else:
                 prev_centroid = None
@@ -515,7 +514,7 @@ def main():
                     })
                     cooldowns[color_name] = COOLDOWN_FRAMES
                     play_color_sound(color_name)
-                    dir_label = "→" if facing else "←"
+                    dir_label = "->" if facing else "<-"
                     print(f"[TRIGGER] {color_name.upper()} ({int(ratio*100)}%) "
                           f"| vel={velocity_pxs:.0f}px/s fish={speed_pps:.0f}px/s "
                           f"| dir={dir_label} pesci={len(active_fish)}")
