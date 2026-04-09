@@ -40,7 +40,7 @@ ARDUINO_COLS               = 96
 ARDUINO_PANEL_W            = 32
 ARDUINO_PANEL_H            = 8
 ARDUINO_PANELS_COUNT       = 3
-ARDUINO_PANEL_ORDER        = [0, 1, 2]
+ARDUINO_PANEL_ORDER        = [2, 1, 0]
 ARDUINO_PANEL_START_BOTTOM = [False] * 3
 ARDUINO_SERPENTINE_Y       = True     # pannelli ruotati: serpentine su Y (colonne dispari invertono Y)
 
@@ -122,7 +122,7 @@ def precompute_led_mapping():
                     eff_y = (ARDUINO_PANEL_H - 1) - y_local
                 if starts_bottom:
                     eff_y = (ARDUINO_PANEL_H - 1) - eff_y
-                global_x   = start_x + x_local
+                global_x   = start_x + (ARDUINO_PANEL_W - 1) - x_local
                 global_y   = eff_y
                 map_y[idx] = global_y
                 map_x[idx] = global_x
