@@ -44,6 +44,11 @@ ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]
 ARDUINO_PANEL_START_BOTTOM = [False] * 7
 ARDUINO_SERPENTINE_X       = True
 
+# ============================================================
+# CONFIGURAZIONE WEBCAM
+# ============================================================
+CAMERA_SCAN = False  # False = usa webcam 0 direttamente. True = scansiona e scegli.
+
 GAMMA       = 2.5
 gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
                         for i in np.arange(0, 256)]).astype("uint8")
@@ -328,6 +333,49 @@ def send_black_and_close(ser):
 
 
 # ============================================================
+# SELEZIONE CAMERA
+# ============================================================
+
+def list_cameras():
+    cameras = []
+    for i in range(10):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                cameras.append(i)
+            cap.release()
+    return cameras
+
+
+def select_camera():
+    if not CAMERA_SCAN:
+        print("[CAM] Webcam 0 (default — CAMERA_SCAN = False)")
+        return 0
+
+    print("\n[SCAN] Ricerca webcam...")
+    cameras = list_cameras()
+    if not cameras:
+        print("[!] Nessuna webcam trovata, provo ID 0...")
+        return 0
+    print(f"[CAM] Trovate: {len(cameras)}")
+    for cam_id in cameras:
+        print(f"  [{cam_id}] Camera {cam_id}")
+    if len(cameras) == 1:
+        print(f"[OK] Camera {cameras[0]} selezionata")
+        return cameras[0]
+    while True:
+        try:
+            choice = input(f"> Seleziona camera (0-{cameras[-1]}): ")
+            cam_id = int(choice)
+            if cam_id in cameras:
+                return cam_id
+            print("[X] Camera non valida!")
+        except ValueError:
+            print("[X] Inserisci un numero!")
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -347,7 +395,8 @@ def main():
 
     ser = create_arduino_serial()
 
-    cap = cv2.VideoCapture(0)
+    camera_id = select_camera()
+    cap = cv2.VideoCapture(camera_id)
     if not cap.isOpened():
         print("[!] Errore apertura webcam")
         send_black_and_close(ser)
