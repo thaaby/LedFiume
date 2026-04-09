@@ -36,12 +36,12 @@ ARDUINO_ENABLED            = True
 ARDUINO_PORT               = "auto"
 ARDUINO_BAUD               = 500000
 ARDUINO_ROWS               = 8
-ARDUINO_COLS               = 224
+ARDUINO_COLS               = 96
 ARDUINO_PANEL_W            = 32
 ARDUINO_PANEL_H            = 8
-ARDUINO_PANELS_COUNT       = 7
-ARDUINO_PANEL_ORDER        = [6, 5, 4, 3, 2, 1, 0]
-ARDUINO_PANEL_START_BOTTOM = [False] * 7
+ARDUINO_PANELS_COUNT       = 3
+ARDUINO_PANEL_ORDER        = [0, 1, 2]
+ARDUINO_PANEL_START_BOTTOM = [False] * 3
 ARDUINO_SERPENTINE_Y       = True     # pannelli ruotati: serpentine su Y (colonne dispari invertono Y)
 
 # ============================================================
@@ -178,11 +178,11 @@ COLOR_RANGES = {
 # ============================================================
 CROSSHAIR_HALF  = None
 MIN_COLOR_RATIO = 0.03
-FISH_DIRECTION  = "right"  # "right" = sempre destra, "left" = sempre sinistra, "auto" = segue il movimento
+FISH_DIRECTION  = "left"  # "right" = sempre destra, "left" = sempre sinistra, "auto" = segue il movimento
 
 ANIM_FPS            = 30
-FISH_SPEED_PPS_MIN  = 80
-FISH_SPEED_PPS_MAX  = 320
+FISH_SPEED_PPS_MIN  = 34
+FISH_SPEED_PPS_MAX  = 136
 VEL_PXS_MIN         = 60
 VEL_PXS_MAX         = 600
 
