@@ -41,7 +41,7 @@ ARDUINO_PANEL_W            = 32
 ARDUINO_PANEL_H            = 8
 ARDUINO_PANELS_COUNT       = 3
 ARDUINO_PANEL_ORDER        = [2, 1, 0]
-ARDUINO_PANEL_START_BOTTOM = [False] * 3
+ARDUINO_PANEL_START_BOTTOM = [True] * 3
 ARDUINO_SERPENTINE_Y       = True     # pannelli ruotati: serpentine su Y (colonne dispari invertono Y)
 
 # ============================================================
