@@ -48,7 +48,7 @@ ARDUINO_SERPENTINE_Y       = True     # pannelli ruotati: serpentine su Y (colon
 # CONFIGURAZIONE WEBCAM
 # ============================================================
 CAMERA_SCAN = False  # False = usa webcam 0 direttamente. True = scansiona e scegli.
-HEADLESS    = False  # True = niente finestre GUI (per uso senza monitor, es. Raspberry Pi)
+HEADLESS    = True  # True = niente finestre GUI (per uso senza monitor, es. Raspberry Pi)
 
 GAMMA       = 2.5
 gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
@@ -658,33 +658,33 @@ def main():
                         int(crosshair_half) + 10, fw // 2, fh // 2)
                 elif key == ord('-'):
                     crosshair_half = max(crosshair_half - 10, 5)
-            elif key == ord('f'):
-                if crosshair_half >= min(fw // 2, fh // 2) - 10:
-                    crosshair_half = 30
-                else:
-                    crosshair_half = min(fw // 2, fh // 2)
-            elif key == ord('b'):
-                print("[INFO] Ricalibrazione sfondo...")
-                bg_accum = None
-                bg_count = 0
-                for _ in range(BG_WARMUP_FRAMES):
-                    ret2, f2 = cap.read()
-                    if not ret2:
-                        continue
-                    f2 = cv2.flip(f2, 1)
-                    f2_blur = cv2.GaussianBlur(f2, (5, 5), 0).astype(np.float32)
-                    if bg_accum is None:
-                        bg_accum = f2_blur
-                        bg_count = 1
+                elif key == ord('f'):
+                    if crosshair_half >= min(fw // 2, fh // 2) - 10:
+                        crosshair_half = 30
                     else:
-                        bg_accum += f2_blur
-                        bg_count += 1
-                background = (bg_accum / bg_count).astype(np.uint8)
-                bg_float = background.astype(np.float32)
-                bg_hsv = cv2.cvtColor(background, cv2.COLOR_BGR2HSV)
-                tube_mask_global = create_tube_mask(bg_hsv)
-                tube_pixels = cv2.countNonZero(tube_mask_global)
-                print(f"[OK] Sfondo ricalibrato ({bg_count} frame), tubo: {tube_pixels} px")
+                        crosshair_half = min(fw // 2, fh // 2)
+                elif key == ord('b'):
+                    print("[INFO] Ricalibrazione sfondo...")
+                    bg_accum = None
+                    bg_count = 0
+                    for _ in range(BG_WARMUP_FRAMES):
+                        ret2, f2 = cap.read()
+                        if not ret2:
+                            continue
+                        f2 = cv2.flip(f2, 1)
+                        f2_blur = cv2.GaussianBlur(f2, (5, 5), 0).astype(np.float32)
+                        if bg_accum is None:
+                            bg_accum = f2_blur
+                            bg_count = 1
+                        else:
+                            bg_accum += f2_blur
+                            bg_count += 1
+                    background = (bg_accum / bg_count).astype(np.uint8)
+                    bg_float = background.astype(np.float32)
+                    bg_hsv = cv2.cvtColor(background, cv2.COLOR_BGR2HSV)
+                    tube_mask_global = create_tube_mask(bg_hsv)
+                    tube_pixels = cv2.countNonZero(tube_mask_global)
+                    print(f"[OK] Sfondo ricalibrato ({bg_count} frame), tubo: {tube_pixels} px")
 
     except Exception as e:
         print(f"\n[!!!] ERRORE: {e}")
