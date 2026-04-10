@@ -48,6 +48,7 @@ ARDUINO_SERPENTINE_Y       = True     # pannelli ruotati: serpentine su Y (colon
 # CONFIGURAZIONE WEBCAM
 # ============================================================
 CAMERA_SCAN = False  # False = usa webcam 0 direttamente. True = scansiona e scegli.
+HEADLESS    = True  # True = niente finestre GUI (per uso senza monitor, es. Raspberry Pi)
 
 GAMMA       = 2.5
 gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
@@ -426,7 +427,8 @@ def main():
         print("\n[INFO] CTRL+C ricevuto, pulizia...")
         send_black_and_close(ser)
         cap.release()
-        cv2.destroyAllWindows()
+        if not HEADLESS:
+            cv2.destroyAllWindows()
         if HAS_SOUND:
             pygame.mixer.quit()
         sys.exit(0)
@@ -635,26 +637,27 @@ def main():
                         (x2 + 8, mid_y + 18),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.40, (200, 200, 200), 1)
 
-            motion_pix = cv2.countNonZero(fgmask)
-            status = f"PESCI:{len(active_fish)}" if active_fish else "IDLE"
-            cv2.putText(frame, f"FPS:{int(fps_avg)}  {status}  MOT:{motion_pix}",
-                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            if not HEADLESS:
+                motion_pix = cv2.countNonZero(fgmask)
+                status = f"PESCI:{len(active_fish)}" if active_fish else "IDLE"
+                cv2.putText(frame, f"FPS:{int(fps_avg)}  {status}  MOT:{motion_pix}",
+                            (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            cv2.imshow("LedOrizzontale - Mirino", frame)
+                cv2.imshow("LedOrizzontale - Mirino", frame)
 
-            preview     = cv2.resize(matrix, (480, 40),
-                                     interpolation=cv2.INTER_NEAREST)
-            preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
-            cv2.imshow("LED Matrix", preview_bgr)
+                preview     = cv2.resize(matrix, (480, 40),
+                                         interpolation=cv2.INTER_NEAREST)
+                preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
+                cv2.imshow("LED Matrix", preview_bgr)
 
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                break
-            elif key == ord('+') or key == ord('='):
-                crosshair_half = min(
-                    int(crosshair_half) + 10, fw // 2, fh // 2)
-            elif key == ord('-'):
-                crosshair_half = max(crosshair_half - 10, 5)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('+') or key == ord('='):
+                    crosshair_half = min(
+                        int(crosshair_half) + 10, fw // 2, fh // 2)
+                elif key == ord('-'):
+                    crosshair_half = max(crosshair_half - 10, 5)
             elif key == ord('f'):
                 if crosshair_half >= min(fw // 2, fh // 2) - 10:
                     crosshair_half = 30
@@ -691,7 +694,8 @@ def main():
     finally:
         print("[INFO] Pulizia in corso...")
         cap.release()
-        cv2.destroyAllWindows()
+        if not HEADLESS:
+            cv2.destroyAllWindows()
         send_black_and_close(ser)
         if HAS_SOUND:
             pygame.mixer.quit()
