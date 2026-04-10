@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-LedOrizzontale — Mirino Centrale + Animazione LED (pannelli orizzontali 224×8)
+LedOrizzontale - Mirino Centrale + Animazione LED (pannelli orizzontali 96x8)
 Niente tracking: rileva rosso/blu/giallo nel mirino.
-Quando un colore passa (anche ad alta velocità), lancia l'animazione pesce.
+Quando un colore passa (anche ad alta velocita), lancia l'animazione pesce.
 """
 
 import cv2
@@ -54,7 +54,7 @@ gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
                         for i in np.arange(0, 256)]).astype("uint8")
 
 # ============================================================
-# SUONI (pygame.mixer — polifonico, non-bloccante)
+# SUONI (pygame.mixer - polifonico, non-bloccante)
 # ============================================================
 _AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'audio')
 _AUDIO_FILES = {
@@ -92,7 +92,7 @@ def _init_audio():
                 print(f"[OK] Audio: {os.path.basename(path)}")
                 continue
             except Exception as e:
-                print(f"[WARN] {os.path.basename(path)}: {e} — campanella sintetica")
+                print(f"[WARN] {os.path.basename(path)}: {e} - campanella sintetica")
         snd = _make_chime_sound(_FALLBACK_FREQS[color])
         snd.set_volume(0.8)
         COLOR_SOUNDS[color] = snd
@@ -191,39 +191,50 @@ BG_LEARN_ALPHA      = 0.001
 BG_DIFF_THRESHOLD   = 30
 
 # ============================================================
-# SPRITE PESCE
+# SPRITE ANIMALI
 # ============================================================
-_FISH_BODY_COLORS = {(255, 126, 0), (237, 28, 36)}
-_FISH_PIXELS: list = []
+# Mappa colore -> file sprite
+_SPRITE_FILES = {
+    'red':    'pesce.png',
+    'blue':   'capitone.png',
+    'yellow': 'girino.png',
+}
+_SPRITES: dict = {}  # colore -> lista di (dy, dx, (R, G, B))
 
-def _load_fish_sprite():
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pixilart-drawing.png')
+def _load_sprite(name, filename):
+    base = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(base, filename)
     img  = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None or img.ndim < 3 or img.shape[2] != 4:
-        print(f"[WARN] {path} non trovato o non RGBA — sprite pesce non caricato")
+        print(f"[WARN] {path} non trovato o non RGBA - sprite {name} non caricato")
         return
     ys, xs = np.where(img[:, :, 3] > 0)
     if len(xs) == 0:
         return
     cx = (int(xs.min()) + int(xs.max())) // 2
     cy = (int(ys.min()) + int(ys.max())) // 2
+    pixels = []
     for y, x in zip(ys.tolist(), xs.tolist()):
         b, g, r, _ = img[y, x]
-        _FISH_PIXELS.append((y - cy, x - cx, (int(r), int(g), int(b))))
-    print(f"[OK] Sprite pesce: {len(_FISH_PIXELS)} pixel, centro=({cx},{cy})")
+        pixels.append((y - cy, x - cx, (int(r), int(g), int(b))))
+    _SPRITES[name] = pixels
+    print(f"[OK] Sprite {name} ({filename}): {len(pixels)} pixel, centro=({cx},{cy})")
 
-_load_fish_sprite()
+for _color, _file in _SPRITE_FILES.items():
+    _load_sprite(_color, _file)
 
 
-def draw_fish(matrix, cx, cy, body_color, facing_right=True):
-    """Disegna il pesce sulla matrice LED. body_color = RGB tuple."""
+def draw_fish(matrix, cx, cy, color_name, facing_right=True):
+    """Disegna lo sprite associato al colore sulla matrice LED."""
+    if color_name not in _SPRITES:
+        return
     rows, cols = matrix.shape[:2]
     s = 1 if facing_right else -1
-    for dy, dx, color in _FISH_PIXELS:
+    for dy, dx, color in _SPRITES[color_name]:
         r = cy + dy
         c = cx + s * dx
         if 0 <= r < rows and 0 <= c < cols:
-            matrix[r, c] = body_color if color in _FISH_BODY_COLORS else color
+            matrix[r, c] = color
 
 
 # ============================================================
@@ -354,7 +365,7 @@ def list_cameras():
 
 def select_camera():
     if not CAMERA_SCAN:
-        print("[CAM] Webcam 0 (default — CAMERA_SCAN = False)")
+        print("[CAM] Webcam 0 (default - CAMERA_SCAN = False)")
         return 0
 
     print("\n[SCAN] Ricerca webcam...")
@@ -384,9 +395,9 @@ def select_camera():
 # ============================================================
 def main():
     global HAS_SOUND
-    print("=== LEDORIZZONTALE — MIRINO CENTRALE ===")
+    print("=== LEDORIZZONTALE - MIRINO CENTRALE ===")
 
-    # ── Init audio (qui, non a livello modulo, per non bloccare l'avvio) ──
+    # -- Init audio (qui, non a livello modulo, per non bloccare l'avvio) --
     if HAS_PYGAME:
         try:
             pygame.mixer.pre_init(44100, -16, 2, 512)
@@ -581,9 +592,8 @@ def main():
 
             next_fish = []
             for fish in active_fish:
-                fish_rgb = COLOR_RANGES[fish['color_name']]['rgb']
                 draw_fish(matrix, int(fish['x']), fish['y'],
-                          fish_rgb, fish['facing_right'])
+                          fish['color_name'], fish['facing_right'])
                 if fish['facing_right']:
                     fish['x'] += fish['speed_pps'] * dt
                 else:
@@ -632,7 +642,7 @@ def main():
 
             cv2.imshow("LedOrizzontale - Mirino", frame)
 
-            preview     = cv2.resize(matrix, (1120, 40),
+            preview     = cv2.resize(matrix, (480, 40),
                                      interpolation=cv2.INTER_NEAREST)
             preview_bgr = cv2.cvtColor(preview, cv2.COLOR_RGB2BGR)
             cv2.imshow("LED Matrix", preview_bgr)
