@@ -67,6 +67,8 @@ gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
 
 BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
 INCOMING_DIR = os.path.join(BASE_DIR, 'INCOMING')
+ARCHIVE_DIR  = os.path.join(BASE_DIR, 'ARCHIVE')
+MAX_IMAGES_PER_FOLDER = 3
 
 # ============================================================
 # SUONI (pygame.mixer)
@@ -388,6 +390,46 @@ def select_camera():
 # ============================================================
 # WATCHDOG - Monitoraggio cartella INCOMING
 # ============================================================
+def enforce_folder_limit(folder_path):
+    """Se la cartella ha piu di MAX_IMAGES_PER_FOLDER PNG, sposta i piu vecchi in ARCHIVE/."""
+    png_files = glob.glob(os.path.join(folder_path, '*.png'))
+    if len(png_files) <= MAX_IMAGES_PER_FOLDER:
+        return
+    # Ordina per data di modifica (piu vecchio prima)
+    png_files.sort(key=lambda f: os.path.getmtime(f))
+    excess = len(png_files) - MAX_IMAGES_PER_FOLDER
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+    for i in range(excess):
+        src = png_files[i]
+        dest = os.path.join(ARCHIVE_DIR, os.path.basename(src))
+        # Evita conflitti di nome nell'archivio
+        if os.path.exists(dest):
+            name, ext = os.path.splitext(os.path.basename(src))
+            dest = os.path.join(ARCHIVE_DIR, f"{name}_{int(time.time())}{ext}")
+        try:
+            shutil.move(src, dest)
+            print(f"[ARCHIVE] {os.path.basename(src)} -> ARCHIVE/")
+        except Exception as e:
+            print(f"[ARCHIVE] Errore: {e}")
+
+
+class ColorFolderHandler(FileSystemEventHandler):
+    """Monitora RED/BLUE/YELLOW: quando arriva un nuovo PNG, applica il limite."""
+
+    def __init__(self, folder_path):
+        super().__init__()
+        self.folder_path = folder_path
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        if not event.src_path.lower().endswith('.png'):
+            return
+        # Aspetta che il file sia completamente scritto (SCP)
+        time.sleep(0.5)
+        enforce_folder_limit(self.folder_path)
+
+
 class IncomingHandler(FileSystemEventHandler):
     """Quando un nuovo PNG arriva in INCOMING/, lo sposta in RED/BLUE/YELLOW random."""
 
@@ -418,23 +460,38 @@ class IncomingHandler(FileSystemEventHandler):
         try:
             shutil.move(filepath, dest_path)
             print(f"[INCOMING] -> {chosen}/{new_filename}")
+            # Applica il limite dopo lo spostamento
+            enforce_folder_limit(dest_dir)
         except Exception as e:
             print(f"[INCOMING] Errore spostamento: {e}")
 
 
 def start_watchdog():
-    """Avvia il watchdog su INCOMING/ in un thread daemon."""
+    """Avvia il watchdog su INCOMING/ e sulle cartelle colore (limite immagini)."""
     if not HAS_WATCHDOG:
         print("[WARN] watchdog non disponibile - i PNG in INCOMING/ non verranno spostati")
         return None
 
     os.makedirs(INCOMING_DIR, exist_ok=True)
-    handler = IncomingHandler()
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
     observer = Observer()
-    observer.schedule(handler, INCOMING_DIR, recursive=False)
+
+    # Watchdog su INCOMING/
+    observer.schedule(IncomingHandler(), INCOMING_DIR, recursive=False)
+    print(f"[OK] Watchdog attivo su INCOMING/")
+
+    # Watchdog sulle cartelle colore (limite MAX_IMAGES_PER_FOLDER)
+    for color_name, folder in SPRITE_FOLDERS.items():
+        os.makedirs(folder, exist_ok=True)
+        observer.schedule(ColorFolderHandler(folder), folder, recursive=False)
+        # Applica il limite anche all'avvio
+        enforce_folder_limit(folder)
+
+    print(f"[OK] Watchdog attivo su RED/, BLUE/, YELLOW/ (max {MAX_IMAGES_PER_FOLDER} img)")
+
     observer.daemon = True
     observer.start()
-    print(f"[OK] Watchdog attivo su {INCOMING_DIR}")
     return observer
 
 
