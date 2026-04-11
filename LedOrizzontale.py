@@ -48,7 +48,7 @@ ARDUINO_SERPENTINE_Y       = True     # pannelli ruotati: serpentine su Y (colon
 # CONFIGURAZIONE WEBCAM
 # ============================================================
 CAMERA_SCAN = False  # False = usa webcam 0 direttamente. True = scansiona e scegli.
-HEADLESS    = True  # True = niente finestre GUI (per uso senza monitor, es. Raspberry Pi)
+HEADLESS    = False  # True = niente finestre GUI (per uso senza monitor, es. Raspberry Pi)
 
 GAMMA       = 2.5
 gamma_table = np.array([((i / 255.0) ** GAMMA) * 255
