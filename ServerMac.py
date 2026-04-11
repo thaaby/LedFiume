@@ -26,7 +26,7 @@ from audio_synth import AudioSynth
 # ============================================================
 RASP_USER = "pit"
 RASP_IP   = "10.134.110.80"
-RASP_PATH = "/home/pit/Desktop/LedFiume/INCOMING/"
+RASP_PROJECT = "/home/pit/Desktop/LedFiume"
 
 # ============================================================
 # CONFIGURAZIONE CANVAS
@@ -42,16 +42,27 @@ DRAWING_CAM_INDEX = 0   # webcam Mac per disegnare
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTBOX = os.path.join(BASE_DIR, 'OUTBOX')
 
+# Round-robin: cicla RED -> BLUE -> YELLOW -> RED -> ...
+_COLOR_CYCLE = ['RED', 'BLUE', 'YELLOW']
+_color_index = 0
+_color_counters = {'RED': 0, 'BLUE': 0, 'YELLOW': 0}
+
 
 # ============================================================
 # SALVATAGGIO + INVIO SCP
 # ============================================================
 def save_and_send(canvas_led):
-    """Salva il disegno come RGBA PNG trasparente e lo invia al Rasp via SCP."""
+    """Salva il disegno come RGBA PNG e lo invia direttamente nella cartella colore sul Rasp."""
+    global _color_index
+
     os.makedirs(LOCAL_OUTBOX, exist_ok=True)
 
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    filename = f"drawing_{timestamp}.png"
+    # Round-robin per distribuzione omogenea
+    chosen = _COLOR_CYCLE[_color_index % len(_COLOR_CYCLE)]
+    _color_index += 1
+    _color_counters[chosen] += 1
+    num = _color_counters[chosen]
+    filename = f"{chosen}_{num}.png"
     filepath = os.path.join(LOCAL_OUTBOX, filename)
 
     # Salva con trasparenza (nero = trasparente)
@@ -64,17 +75,17 @@ def save_and_send(canvas_led):
 
     bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
     cv2.imwrite(filepath, bgra)
-    print(f"[SALVA] {filename} salvato localmente")
+    print(f"[SALVA] {filename} -> {chosen}/")
 
-    # Invia via SCP al Raspberry
-    dest = f"{RASP_USER}@{RASP_IP}:{RASP_PATH}"
+    # Invia via SCP direttamente nella cartella colore sul Rasp
+    dest = f"{RASP_USER}@{RASP_IP}:{RASP_PROJECT}/{chosen}/{filename}"
     try:
         result = subprocess.run(
             ["scp", "-o", "ConnectTimeout=5", filepath, dest],
             capture_output=True, timeout=10
         )
         if result.returncode == 0:
-            print(f"[SCP] {filename} -> {RASP_IP} OK")
+            print(f"[SCP] {filename} -> {RASP_IP}:{chosen}/ OK")
         else:
             err = result.stderr.decode().strip()
             print(f"[SCP] ERRORE: {err}")
@@ -112,7 +123,7 @@ def main():
     last_erase_time = 0.0
     ERASE_COOLDOWN = 1.5
 
-    print(f"\n[INFO] Destinazione SCP: {RASP_USER}@{RASP_IP}:{RASP_PATH}")
+    print(f"\n[INFO] Destinazione SCP: {RASP_USER}@{RASP_IP}:{RASP_PROJECT}")
     print("\n" + "-" * 50)
     print("  CONTROLLI:")
     print("  [1-9]   - Cambia colore pennello")

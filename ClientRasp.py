@@ -409,12 +409,15 @@ class IncomingHandler(FileSystemEventHandler):
         dest_dir = os.path.join(BASE_DIR, chosen)
         os.makedirs(dest_dir, exist_ok=True)
 
-        filename = os.path.basename(filepath)
-        dest_path = os.path.join(dest_dir, filename)
+        # Nome: colore_N.png (es. RED_1.png, BLUE_2.png)
+        existing = glob.glob(os.path.join(dest_dir, f"{chosen}_*.png"))
+        next_num = len(existing) + 1
+        new_filename = f"{chosen}_{next_num}.png"
+        dest_path = os.path.join(dest_dir, new_filename)
 
         try:
             shutil.move(filepath, dest_path)
-            print(f"[INCOMING] {filename} -> {chosen}/")
+            print(f"[INCOMING] -> {chosen}/{new_filename}")
         except Exception as e:
             print(f"[INCOMING] Errore spostamento: {e}")
 
