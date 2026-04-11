@@ -25,7 +25,7 @@ from audio_synth import AudioSynth
 # CONFIGURAZIONE RASPBERRY (SCP)
 # ============================================================
 RASP_USER = "pit"
-RASP_IP   = "10.204.106.80"
+RASP_IP   = "10.134.110.80"
 RASP_PATH = "/home/pit/Desktop/LedFiume/INCOMING/"
 
 # ============================================================
@@ -37,7 +37,7 @@ CANVAS_H = 8
 # ============================================================
 # CONFIGURAZIONE WEBCAM
 # ============================================================
-DRAWING_CAM_INDEX = 1   # webcam Mac per disegnare
+DRAWING_CAM_INDEX = 0   # webcam Mac per disegnare
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTBOX = os.path.join(BASE_DIR, 'OUTBOX')
