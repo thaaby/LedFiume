@@ -230,11 +230,10 @@ def load_random_sprite(color_name):
     if len(xs) == 0:
         return None
     cx = (int(xs.min()) + int(xs.max())) // 2
-    cy = (int(ys.min()) + int(ys.max())) // 2
     pixels = []
     for y, x in zip(ys.tolist(), xs.tolist()):
         b, g, r, _ = img[y, x]
-        pixels.append((y - cy, x - cx, (int(r), int(g), int(b))))
+        pixels.append((y, x - cx, (int(r), int(g), int(b))))
     print(f"[SPRITE] {os.path.basename(path)} da {color_name}/: {len(pixels)} px")
     return pixels
 
@@ -414,20 +413,36 @@ def enforce_folder_limit(folder_path):
 
 
 class ColorFolderHandler(FileSystemEventHandler):
-    """Monitora RED/BLUE/YELLOW: quando arriva un nuovo PNG, applica il limite."""
+    """Monitora RED/BLUE/YELLOW: quando arriva un nuovo PNG, applica il limite.
+    Gestisce sia on_created (file nuovo) che on_modified (file sovrascritto da SCP)."""
 
     def __init__(self, folder_path):
         super().__init__()
         self.folder_path = folder_path
+        self._last_check = 0
 
-    def on_created(self, event):
+    def _handle(self, event):
         if event.is_directory:
             return
         if not event.src_path.lower().endswith('.png'):
             return
-        # Aspetta che il file sia completamente scritto (SCP)
-        time.sleep(0.5)
+        # Evita check multipli ravvicinati (SCP genera piu eventi per file)
+        now = time.time()
+        if now - self._last_check < 1.0:
+            return
+        self._last_check = now
+        # Aspetta che il file sia completamente scritto
+        time.sleep(1.0)
         enforce_folder_limit(self.folder_path)
+
+    def on_created(self, event):
+        self._handle(event)
+
+    def on_modified(self, event):
+        self._handle(event)
+
+    def on_closed(self, event):
+        self._handle(event)
 
 
 class IncomingHandler(FileSystemEventHandler):
@@ -684,7 +699,7 @@ def main():
                         active_fish.append({
                             'pixels':       sprite_pixels,
                             'x':            start_x,
-                            'y':            ARDUINO_ROWS // 2,
+                            'y':            0,
                             'speed_pps':    speed_pps,
                             'facing_right': facing,
                         })

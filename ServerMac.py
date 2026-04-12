@@ -18,14 +18,24 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 '..', 'Lavagna-LED', 'Lavagna-LED'))
 from hand_tracker import HandTracker, HandState
-from led_canvas import LEDCanvas, COLOR_PALETTE, COLOR_NAMES_IT
+from led_canvas import LEDCanvas
 from audio_synth import AudioSynth
+
+# 5 colori: Rosso, Blu, Giallo, Bianco, Nero
+COLOR_PALETTE = [
+    (255, 0, 0),      # 1 — Rosso
+    (0, 100, 255),    # 2 — Blu
+    (255, 255, 0),    # 3 — Giallo
+    (255, 255, 255),  # 4 — Bianco
+    (0, 0, 0),        # 5 — Nero
+]
+COLOR_NAMES_IT = ["Rosso", "Blu", "Giallo", "Bianco", "Nero"]
 
 # ============================================================
 # CONFIGURAZIONE RASPBERRY (SCP)
 # ============================================================
 RASP_USER = "pit"
-RASP_IP   = "10.134.110.80"
+RASP_IP   = "Webcamproject1-ui.local"
 RASP_PROJECT = "/home/pit/Desktop/LedFiume"
 
 # ============================================================
@@ -42,31 +52,53 @@ DRAWING_CAM_INDEX = 0   # webcam Mac per disegnare
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTBOX = os.path.join(BASE_DIR, 'OUTBOX')
 
-# Round-robin: cicla RED -> BLUE -> YELLOW -> RED -> ...
-_COLOR_CYCLE = ['RED', 'BLUE', 'YELLOW']
-_color_index = 0
 _color_counters = {'RED': 0, 'BLUE': 0, 'YELLOW': 0}
+
+# Mappatura colore dominante -> cartella
+# Distanze calcolate in spazio RGB rispetto ai 3 colori target
+_FOLDER_COLORS = {
+    'RED':    np.array([255, 0, 0]),
+    'BLUE':   np.array([0, 100, 255]),
+    'YELLOW': np.array([255, 255, 0]),
+}
+
+
+def _detect_dominant_folder(rgb):
+    """Rileva il colore dominante (escluso nero) e restituisce RED/BLUE/YELLOW."""
+    non_black = np.any(rgb > 0, axis=2)
+    if not np.any(non_black):
+        return 'RED'  # fallback se tutto nero
+    pixels = rgb[non_black].astype(np.float32)  # (N, 3)
+
+    # Conta pixel piu vicini a ciascun colore target
+    counts = {}
+    for name, target in _FOLDER_COLORS.items():
+        dists = np.linalg.norm(pixels - target.astype(np.float32), axis=1)
+        counts[name] = int(np.sum(dists < 200))
+
+    # Il colore con piu pixel vicini vince
+    chosen = max(counts, key=counts.get)
+    print(f"[COLORE DOMINANTE] R={counts['RED']} B={counts['BLUE']} Y={counts['YELLOW']} -> {chosen}")
+    return chosen
 
 
 # ============================================================
 # SALVATAGGIO + INVIO SCP
 # ============================================================
 def save_and_send(canvas_led):
-    """Salva il disegno come RGBA PNG e lo invia direttamente nella cartella colore sul Rasp."""
-    global _color_index
-
+    """Salva il disegno come RGBA PNG e lo invia nella cartella del colore dominante sul Rasp."""
     os.makedirs(LOCAL_OUTBOX, exist_ok=True)
 
-    # Round-robin per distribuzione omogenea
-    chosen = _COLOR_CYCLE[_color_index % len(_COLOR_CYCLE)]
-    _color_index += 1
+    # Analizza colore dominante
+    rgb = canvas_led.get_frame_rgb()  # (8, 32, 3)
+    chosen = _detect_dominant_folder(rgb)
+
     _color_counters[chosen] += 1
     num = _color_counters[chosen]
     filename = f"{chosen}_{num}.png"
     filepath = os.path.join(LOCAL_OUTBOX, filename)
 
     # Salva con trasparenza (nero = trasparente)
-    rgb = canvas_led.get_frame_rgb()  # (8, 32, 3)
     h, w = rgb.shape[:2]
     rgba = np.zeros((h, w, 4), dtype=np.uint8)
     rgba[:, :, :3] = rgb
@@ -74,6 +106,7 @@ def save_and_send(canvas_led):
     rgba[non_black, 3] = 255
 
     bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+    bgra = cv2.flip(bgra, 1)  # Specchia orizzontalmente per allineare ai LED
     cv2.imwrite(filepath, bgra)
     print(f"[SALVA] {filename} -> {chosen}/")
 
@@ -116,8 +149,15 @@ def main():
 
     # -- Hand tracker e canvas --
     synth = AudioSynth()
-    tracker = HandTracker(canvas_width=CANVAS_W, canvas_height=CANVAS_H)
+    tracker = HandTracker(canvas_width=CANVAS_W, canvas_height=CANVAS_H, num_hands=1)
     canvas_led = LEDCanvas(CANVAS_W, CANVAS_H)
+
+    # Forza la palette custom sul canvas
+    import led_canvas as _lc
+    _lc.COLOR_PALETTE = COLOR_PALETTE
+    _lc.COLOR_NAMES_IT = COLOR_NAMES_IT
+    canvas_led._color_index = 0
+    canvas_led.current_color = COLOR_PALETTE[0]
 
     # -- Stato --
     last_erase_time = 0.0
@@ -126,7 +166,9 @@ def main():
     print(f"\n[INFO] Destinazione SCP: {RASP_USER}@{RASP_IP}:{RASP_PROJECT}")
     print("\n" + "-" * 50)
     print("  CONTROLLI:")
-    print("  [1-9]   - Cambia colore pennello")
+    print("  [1]     - Tracking 1 mano (default)")
+    print("  [2]     - Tracking 2 mani")
+    print("  [R/B/Y/W/N] - Colore (Rosso/Blu/Giallo/Bianco/Nero)")
     print("  [+/-]   - Cambia dimensione pennello")
     print("  [C]     - Cancella lavagna")
     print("  [S]     - Salva e invia al Raspberry")
@@ -145,6 +187,14 @@ def main():
                 time.sleep(0.01)
                 continue
             frame = cv2.flip(frame, 1)
+
+            # -- Calcolo griglia (serve per pixel-perfect tracking) --
+            fh, fw = frame.shape[:2]
+            cell = min(fw // CANVAS_W, fh // CANVAS_H)
+            grid_w = cell * CANVAS_W
+            grid_h = cell * CANVAS_H
+            ox = (fw - grid_w) // 2
+            oy = (fh - grid_h) // 2
 
             # -- Hand tracking --
             hand_states = tracker.process_frame(frame)
@@ -171,44 +221,65 @@ def main():
                     canvas_led.set_color_by_index(next_idx)
                     print(f"[COLORE] {canvas_led.get_color_name()}")
 
-                if hand_state.drawing:
-                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y,
+                # Pixel-perfect: mappa posizione dito sulla griglia
+                px = int(hand_state.raw_x * fw)
+                py = int(hand_state.raw_y * fh)
+                gx = (px - ox) // cell if cell > 0 else -1
+                gy = (py - oy) // cell if cell > 0 else -1
+                in_grid = 0 <= gx < CANVAS_W and 0 <= gy < CANVAS_H
+
+                if hand_state.drawing and in_grid:
+                    canvas_led.draw_at(gx, gy,
                                        True, hand_id=hand_state.hand_label,
                                        is_erasing=False)
-                    synth.play_note(hand_state.canvas_x, hand_state.canvas_y,
+                    synth.play_note(gx, gy,
                                    canvas_led.width, canvas_led.height, True)
-                elif hand_state.precision_erasing:
-                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y,
+                elif hand_state.precision_erasing and in_grid:
+                    canvas_led.draw_at(gx, gy,
                                        True, hand_id=hand_state.hand_label,
                                        is_erasing=True)
                 else:
-                    canvas_led.draw_at(hand_state.canvas_x, hand_state.canvas_y,
+                    canvas_led.draw_at(gx, gy,
                                        False, hand_id=hand_state.hand_label,
                                        is_erasing=False)
 
-            # -- GUI --
+            # -- GUI: griglia LED sovrapposta alla webcam --
             frame_preview = frame.copy()
             for hand_state in hand_states:
                 tracker.draw_overlay(frame_preview, hand_state)
 
+            # Disegna pixel colorati con opacita 70%
+            rgb = canvas_led.get_frame_rgb()  # (8, 32, 3)
+            overlay = frame_preview.copy()
+            for gy in range(CANVAS_H):
+                for gx in range(CANVAS_W):
+                    r, g, b = int(rgb[gy, gx, 0]), int(rgb[gy, gx, 1]), int(rgb[gy, gx, 2])
+                    if r > 0 or g > 0 or b > 0:
+                        px1 = ox + gx * cell
+                        py1 = oy + gy * cell
+                        cv2.rectangle(overlay, (px1, py1),
+                                      (px1 + cell, py1 + cell), (b, g, r), -1)
+            cv2.addWeighted(overlay, 0.7, frame_preview, 0.3, 0, frame_preview)
+
+            # Griglia
+            grid_color = (80, 80, 80)
+            for gx in range(CANVAS_W + 1):
+                x = ox + gx * cell
+                cv2.line(frame_preview, (x, oy), (x, oy + grid_h), grid_color, 1)
+            for gy in range(CANVAS_H + 1):
+                y = oy + gy * cell
+                cv2.line(frame_preview, (ox, y), (ox + grid_w, y), grid_color, 1)
+
+            # Info colore e mani
             color_bgr = tuple(int(c) for c in canvas_led.current_color[::-1])
-            info_text = f"Colore: {canvas_led.get_color_name()} | Pennello: {canvas_led.brush_size}px"
+            hands_label = f"Mani: {tracker.num_hands}"
+            info_text = f"{hands_label} | Colore: {canvas_led.get_color_name()} | Pennello: {canvas_led.brush_size}px"
             cv2.putText(frame_preview, info_text, (10, frame.shape[0] - 15),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2)
-            cv2.rectangle(frame_preview, (frame.shape[1] - 50, 10),
-                          (frame.shape[1] - 10, 50), color_bgr, -1)
-            cv2.rectangle(frame_preview, (frame.shape[1] - 50, 10),
-                          (frame.shape[1] - 10, 50), (255, 255, 255), 1)
-            cv2.imshow('ServerMac - Webcam', frame_preview)
+            cv2.rectangle(frame_preview, (fw - 50, 10), (fw - 10, 50), color_bgr, -1)
+            cv2.rectangle(frame_preview, (fw - 50, 10), (fw - 10, 50), (255, 255, 255), 1)
 
-            cursor_x, cursor_y = -1, -1
-            for h in hand_states:
-                if h.detected:
-                    cursor_x, cursor_y = h.canvas_x, h.canvas_y
-                    break
-            canvas_preview = canvas_led.get_preview(
-                scale=15, cursor_x=cursor_x, cursor_y=cursor_y)
-            cv2.imshow('ServerMac - Canvas', canvas_preview)
+            cv2.imshow('ServerMac', frame_preview)
 
             # -- Tastiera --
             key = cv2.waitKey(16) & 0xFF
@@ -228,9 +299,24 @@ def main():
                 new_size = max(1, canvas_led.brush_size - 1)
                 canvas_led.set_brush_size(new_size)
                 print(f"[PENNELLO] {new_size}px")
-            elif ord('1') <= key <= ord('9'):
-                idx = key - ord('1')
-                canvas_led.set_color_by_index(idx)
+            elif key == ord('1'):
+                tracker.set_num_hands(1)
+            elif key == ord('2'):
+                tracker.set_num_hands(2)
+            elif key == ord('r'):
+                canvas_led.set_color_by_index(0)
+                print(f"[COLORE] {canvas_led.get_color_name()}")
+            elif key == ord('b'):
+                canvas_led.set_color_by_index(1)
+                print(f"[COLORE] {canvas_led.get_color_name()}")
+            elif key == ord('y'):
+                canvas_led.set_color_by_index(2)
+                print(f"[COLORE] {canvas_led.get_color_name()}")
+            elif key == ord('w'):
+                canvas_led.set_color_by_index(3)
+                print(f"[COLORE] {canvas_led.get_color_name()}")
+            elif key == ord('n'):
+                canvas_led.set_color_by_index(4)
                 print(f"[COLORE] {canvas_led.get_color_name()}")
 
     except KeyboardInterrupt:
