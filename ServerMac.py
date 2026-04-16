@@ -9,14 +9,10 @@ import cv2
 import numpy as np
 import time
 import os
-import sys
 import subprocess
 import random
 from datetime import datetime
 
-# Moduli della Lavagna LED (in Lavagna-LED/)
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                '..', 'Lavagna-LED', 'Lavagna-LED'))
 from hand_tracker import HandTracker, HandState
 from led_canvas import LEDCanvas
 from audio_synth import AudioSynth
@@ -53,6 +49,50 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_OUTBOX = os.path.join(BASE_DIR, 'OUTBOX')
 
 _color_counters = {'RED': 0, 'BLUE': 0, 'YELLOW': 0}
+
+# ============================================================
+# UNDO
+# ============================================================
+MAX_UNDO = 20
+_undo_stack = []
+
+def push_undo(canvas_led):
+    """Salva snapshot del canvas nello stack undo."""
+    _undo_stack.append(canvas_led.pixels.copy())
+    if len(_undo_stack) > MAX_UNDO:
+        _undo_stack.pop(0)
+
+def pop_undo(canvas_led):
+    """Ripristina l'ultimo snapshot dallo stack undo."""
+    if not _undo_stack:
+        print("[UNDO] Niente da annullare")
+        return
+    canvas_led.pixels[:] = _undo_stack.pop()
+    print("[UNDO] Ripristinato")
+
+# ============================================================
+# FLOOD FILL
+# ============================================================
+def flood_fill(canvas_led, x, y, new_color):
+    """Flood fill 4-connesso a partire da (x, y) col colore new_color."""
+    pixels = canvas_led.pixels
+    target = tuple(pixels[y, x])
+    fill = tuple(new_color)
+    if target == fill:
+        return
+    stack = [(x, y)]
+    visited = set()
+    while stack:
+        cx, cy = stack.pop()
+        if (cx, cy) in visited:
+            continue
+        if cx < 0 or cx >= canvas_led.width or cy < 0 or cy >= canvas_led.height:
+            continue
+        if tuple(pixels[cy, cx]) != target:
+            continue
+        visited.add((cx, cy))
+        pixels[cy, cx] = new_color
+        stack.extend([(cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)])
 
 # Mappatura colore dominante -> cartella
 # Distanze calcolate in spazio RGB rispetto ai 3 colori target
@@ -162,6 +202,9 @@ def main():
     # -- Stato --
     last_erase_time = 0.0
     ERASE_COOLDOWN = 1.5
+    fill_mode = False
+    was_drawing_prev = {}  # per sapere quando un tratto inizia (per push_undo)
+    fill_cooldown = 0.0
 
     print(f"\n[INFO] Destinazione SCP: {RASP_USER}@{RASP_IP}:{RASP_PROJECT}")
     print("\n" + "-" * 50)
@@ -170,6 +213,8 @@ def main():
     print("  [2]     - Tracking 2 mani")
     print("  [R/B/Y/W/N] - Colore (Rosso/Blu/Giallo/Bianco/Nero)")
     print("  [+/-]   - Cambia dimensione pennello")
+    print("  [F]     - Toggle modalita Fill")
+    print("  [Z]     - Undo")
     print("  [C]     - Cancella lavagna")
     print("  [S]     - Salva e invia al Raspberry")
     print("  [Q/ESC] - Esci")
@@ -210,6 +255,7 @@ def main():
 
             for hand_state in hand_states:
                 if hand_state.thumbs_down and not is_any_drawing and (time.time() - last_erase_time > ERASE_COOLDOWN):
+                    push_undo(canvas_led)
                     canvas_led.clear()
                     last_erase_time = time.time()
                     print("[CANCELLA] Lavagna cancellata!")
@@ -228,67 +274,124 @@ def main():
                 gy = (py - oy) // cell if cell > 0 else -1
                 in_grid = 0 <= gx < CANVAS_W and 0 <= gy < CANVAS_H
 
+                hid = hand_state.hand_label
+
                 if hand_state.drawing and in_grid:
-                    canvas_led.draw_at(gx, gy,
-                                       True, hand_id=hand_state.hand_label,
-                                       is_erasing=False)
+                    if fill_mode:
+                        # Fill mode: flood fill con cooldown
+                        if time.time() - fill_cooldown > 0.5:
+                            push_undo(canvas_led)
+                            flood_fill(canvas_led, gx, gy, canvas_led.current_color)
+                            fill_cooldown = time.time()
+                    else:
+                        # Undo al primo pixel di un nuovo tratto
+                        if not was_drawing_prev.get(hid, False):
+                            push_undo(canvas_led)
+                        canvas_led.draw_at(gx, gy,
+                                           True, hand_id=hid,
+                                           is_erasing=False)
                     synth.play_note(gx, gy,
                                    canvas_led.width, canvas_led.height, True)
+                    was_drawing_prev[hid] = True
                 elif hand_state.precision_erasing and in_grid:
+                    if not was_drawing_prev.get(hid, False):
+                        push_undo(canvas_led)
                     canvas_led.draw_at(gx, gy,
-                                       True, hand_id=hand_state.hand_label,
+                                       True, hand_id=hid,
                                        is_erasing=True)
+                    was_drawing_prev[hid] = True
                 else:
                     canvas_led.draw_at(gx, gy,
-                                       False, hand_id=hand_state.hand_label,
+                                       False, hand_id=hid,
                                        is_erasing=False)
+                    was_drawing_prev[hid] = False
 
             # -- GUI: griglia LED sovrapposta alla webcam --
             frame_preview = frame.copy()
-            for hand_state in hand_states:
-                tracker.draw_overlay(frame_preview, hand_state)
 
-            # Disegna pixel colorati con opacita 70%
-            rgb = canvas_led.get_frame_rgb()  # (8, 32, 3)
+            # 1) Pixel colorati (opacita 70%)
+            rgb = canvas_led.get_frame_rgb()
             overlay = frame_preview.copy()
-            for gy in range(CANVAS_H):
-                for gx in range(CANVAS_W):
-                    r, g, b = int(rgb[gy, gx, 0]), int(rgb[gy, gx, 1]), int(rgb[gy, gx, 2])
+            for gy_i in range(CANVAS_H):
+                for gx_i in range(CANVAS_W):
+                    r, g, b = int(rgb[gy_i, gx_i, 0]), int(rgb[gy_i, gx_i, 1]), int(rgb[gy_i, gx_i, 2])
                     if r > 0 or g > 0 or b > 0:
-                        px1 = ox + gx * cell
-                        py1 = oy + gy * cell
+                        px1 = ox + gx_i * cell
+                        py1 = oy + gy_i * cell
                         cv2.rectangle(overlay, (px1, py1),
                                       (px1 + cell, py1 + cell), (b, g, r), -1)
             cv2.addWeighted(overlay, 0.7, frame_preview, 0.3, 0, frame_preview)
 
-            # Griglia
-            grid_color = (80, 80, 80)
-            for gx in range(CANVAS_W + 1):
-                x = ox + gx * cell
-                cv2.line(frame_preview, (x, oy), (x, oy + grid_h), grid_color, 1)
-            for gy in range(CANVAS_H + 1):
-                y = oy + gy * cell
-                cv2.line(frame_preview, (ox, y), (ox + grid_w, y), grid_color, 1)
+            # 2) Griglia (sottile, anti-aliased)
+            grid_color = (60, 60, 60)
+            for gx_i in range(CANVAS_W + 1):
+                x = ox + gx_i * cell
+                cv2.line(frame_preview, (x, oy), (x, oy + grid_h), grid_color, 1, cv2.LINE_AA)
+            for gy_i in range(CANVAS_H + 1):
+                y = oy + gy_i * cell
+                cv2.line(frame_preview, (ox, y), (ox + grid_w, y), grid_color, 1, cv2.LINE_AA)
+            # Bordo griglia
+            cv2.rectangle(frame_preview, (ox, oy), (ox + grid_w, oy + grid_h),
+                          (110, 110, 110), 2, cv2.LINE_AA)
 
-            # Info colore e mani
-            color_bgr = tuple(int(c) for c in canvas_led.current_color[::-1])
-            hands_label = f"Mani: {tracker.num_hands}"
-            info_text = f"{hands_label} | Colore: {canvas_led.get_color_name()} | Pennello: {canvas_led.brush_size}px"
-            cv2.putText(frame_preview, info_text, (10, frame.shape[0] - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_bgr, 2)
-            cv2.rectangle(frame_preview, (fw - 50, 10), (fw - 10, 50), color_bgr, -1)
-            cv2.rectangle(frame_preview, (fw - 50, 10), (fw - 10, 50), (255, 255, 255), 1)
+            # 3) Scheletro mano + mirino (sopra la griglia)
+            for hand_state in hand_states:
+                tracker.draw_overlay(frame_preview, hand_state)
 
-            cv2.imshow('ServerMac', frame_preview)
+            # 4) Barra info in basso (semi-trasparente)
+            bar_h = 38
+            bar_y = fh - bar_h
+            bar_overlay = frame_preview.copy()
+            cv2.rectangle(bar_overlay, (0, bar_y), (fw, fh), (25, 25, 25), -1)
+            cv2.addWeighted(bar_overlay, 0.82, frame_preview, 0.18, 0, frame_preview)
+
+            # Palette colori (cerchi)
+            pal_x = 14
+            for ci, col in enumerate(COLOR_PALETTE):
+                cx_c = pal_x + ci * 26
+                cy_c = bar_y + bar_h // 2
+                bgr_c = (int(col[2]), int(col[1]), int(col[0]))
+                # Cerchio nero visibile con bordo
+                if col == (0, 0, 0):
+                    cv2.circle(frame_preview, (cx_c, cy_c), 8, (50, 50, 50), -1, cv2.LINE_AA)
+                else:
+                    cv2.circle(frame_preview, (cx_c, cy_c), 8, bgr_c, -1, cv2.LINE_AA)
+                # Evidenzia colore attivo
+                if ci == canvas_led.get_color_index():
+                    cv2.circle(frame_preview, (cx_c, cy_c), 11, (255, 255, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.circle(frame_preview, (cx_c, cy_c), 9, (70, 70, 70), 1, cv2.LINE_AA)
+
+            # Testo info
+            txt_x = pal_x + len(COLOR_PALETTE) * 26 + 12
+            parts = [f"Pen:{canvas_led.brush_size}", f"Mani:{tracker.num_hands}"]
+            if fill_mode:
+                parts.append("FILL")
+            undo_n = len(_undo_stack)
+            if undo_n > 0:
+                parts.append(f"Undo:{undo_n}")
+            info_str = "  ".join(parts)
+            cv2.putText(frame_preview, info_str,
+                        (txt_x, bar_y + bar_h // 2 + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                        (190, 190, 190), 1, cv2.LINE_AA)
+
+            cv2.imshow('FLED CAM v1.0.9', frame_preview)
 
             # -- Tastiera --
             key = cv2.waitKey(16) & 0xFF
             if key == ord('q') or key == 27:
                 break
             elif key == ord('c'):
+                push_undo(canvas_led)
                 canvas_led.clear()
                 last_erase_time = time.time()
                 print("[CANCELLA] Lavagna cancellata (tasto C)")
+            elif key == ord('z'):
+                pop_undo(canvas_led)
+            elif key == ord('f'):
+                fill_mode = not fill_mode
+                print(f"[FILL] {'ON' if fill_mode else 'OFF'}")
             elif key == ord('s'):
                 save_and_send(canvas_led)
             elif key == ord('+') or key == ord('='):
@@ -299,7 +402,7 @@ def main():
                 new_size = max(1, canvas_led.brush_size - 1)
                 canvas_led.set_brush_size(new_size)
                 print(f"[PENNELLO] {new_size}px")
-            elif key == ord('1'):
+            elif key == ord('1'): 
                 tracker.set_num_hands(1)
             elif key == ord('2'):
                 tracker.set_num_hands(2)

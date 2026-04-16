@@ -2,7 +2,7 @@
 """
 ClientRasp.py - Riceve PNG + Palline + LED (Raspberry Pi)
 Watchdog monitora INCOMING/ per nuovi PNG e li sposta in RED/BLUE/YELLOW.
-Webcam rileva palline colorate e anima sprite random sui LED 96x8.
+Webcam rileva palline colorate e anima sprite random sui LED 96x8. siummicanzis
 """
 
 import cv2
@@ -214,14 +214,29 @@ SPRITE_FOLDERS = {
     'yellow': os.path.join(BASE_DIR, 'YELLOW'),
 }
 
+# Sprite di default: MAI cancellare/archiviare questi file
+DEFAULT_SPRITES = {
+    'red':    'pesce.png',
+    'blue':   'capitone.png',
+    'yellow': 'girino.png',
+}
+PROTECTED_FILES = set(DEFAULT_SPRITES.values())
+
 def load_random_sprite(color_name):
-    """Carica un PNG random dalla cartella del colore."""
+    """Carica un PNG random dalla cartella del colore. Fallback allo sprite default."""
     folder = SPRITE_FOLDERS.get(color_name)
     if not folder or not os.path.isdir(folder):
         return None
     png_files = glob.glob(os.path.join(folder, '*.png'))
     if not png_files:
-        return None
+        # Fallback: sprite default
+        default_name = DEFAULT_SPRITES.get(color_name)
+        if default_name:
+            fallback_path = os.path.join(folder, default_name)
+            if os.path.exists(fallback_path):
+                png_files = [fallback_path]
+        if not png_files:
+            return None
     path = random.choice(png_files)
     img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     if img is None or img.ndim < 3 or img.shape[2] != 4:
@@ -390,16 +405,22 @@ def select_camera():
 # WATCHDOG - Monitoraggio cartella INCOMING
 # ============================================================
 def enforce_folder_limit(folder_path):
-    """Se la cartella ha piu di MAX_IMAGES_PER_FOLDER PNG, sposta i piu vecchi in ARCHIVE/."""
+    """Se la cartella ha piu di MAX_IMAGES_PER_FOLDER PNG, sposta i piu vecchi in ARCHIVE/.
+    I file in PROTECTED_FILES (sprite default) non vengono mai archiviati."""
     png_files = glob.glob(os.path.join(folder_path, '*.png'))
-    if len(png_files) <= MAX_IMAGES_PER_FOLDER:
+    # Separa protetti da archiviabili
+    archivable = [f for f in png_files if os.path.basename(f) not in PROTECTED_FILES]
+    total = len(png_files)
+    if total <= MAX_IMAGES_PER_FOLDER:
         return
-    # Ordina per data di modifica (piu vecchio prima)
-    png_files.sort(key=lambda f: os.path.getmtime(f))
-    excess = len(png_files) - MAX_IMAGES_PER_FOLDER
+    # Ordina per data di modifica (piu vecchio prima) - solo i non protetti
+    archivable.sort(key=lambda f: os.path.getmtime(f))
+    excess = total - MAX_IMAGES_PER_FOLDER
     os.makedirs(ARCHIVE_DIR, exist_ok=True)
-    for i in range(excess):
-        src = png_files[i]
+    archived = 0
+    for src in archivable:
+        if archived >= excess:
+            break
         dest = os.path.join(ARCHIVE_DIR, os.path.basename(src))
         # Evita conflitti di nome nell'archivio
         if os.path.exists(dest):
@@ -408,6 +429,7 @@ def enforce_folder_limit(folder_path):
         try:
             shutil.move(src, dest)
             print(f"[ARCHIVE] {os.path.basename(src)} -> ARCHIVE/")
+            archived += 1
         except Exception as e:
             print(f"[ARCHIVE] Errore: {e}")
 
