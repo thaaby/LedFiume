@@ -26,7 +26,7 @@ PINCH_STOP_RATIO        = 0.28    # isteresi per evitare flickering
 PEACE_ACTIVATE_FRAMES   = 2       # via di mezzo
 PEACE_COOLDOWN_SEC      = 0.5     # secondi di cooldown dopo cambio colore
 ERASER_ACTIVATE_FRAMES  = 6
-THUMBS_DOWN_ACTIVATE_FRAMES = 10
+THUMBS_DOWN_ACTIVATE_FRAMES = 2
 PEACE_POST_DRAW_GRACE   = 10
 
 # ── 1-Euro Filter (anti-tremore adattivo) ────────────────────
@@ -407,15 +407,24 @@ class HandTracker:
         return index_straight and middle_straight and ring_bent and pinky_bent
 
     def _is_thumbs_down(self, landmarks, fingers_up):
+        """Pollice giu: pollice punta in basso, tutte le altre dita piegate."""
         thumb_tip = landmarks[4]
         thumb_mcp = landmarks[2]
         wrist = landmarks[0]
 
-        thumb_pointing_down = thumb_tip.y > thumb_mcp.y + 0.05
+        # Pollice deve puntare verso il basso
+        thumb_pointing_down = thumb_tip.y > thumb_mcp.y + 0.03
         thumb_below_wrist = thumb_tip.y > wrist.y
-        others_closed = not any(fingers_up[1:])
 
-        return thumb_pointing_down and thumb_below_wrist and others_closed
+        # Altre dita piegate (angoli, come per peace)
+        index_angle  = self._finger_angle(landmarks, 5, 6, 8)
+        middle_angle = self._finger_angle(landmarks, 9, 10, 12)
+        ring_angle   = self._finger_angle(landmarks, 13, 14, 16)
+        pinky_angle  = self._finger_angle(landmarks, 17, 18, 20)
+        others_bent = (index_angle < 140 and middle_angle < 140 and
+                       ring_angle < 140 and pinky_angle < 140)
+
+        return thumb_pointing_down and thumb_below_wrist and others_bent
 
     # ── Overlay ───────────────────────────────────────────────
 
