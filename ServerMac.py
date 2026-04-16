@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-ServerMac.py - Lavagna LED (solo disegno + invio al Raspberry)
-Disegna con i gesti sulla canvas 8x32, salva con S come PNG trasparente
-e invia automaticamente al Raspberry Pi via SCP nella cartella INCOMING/.
-"""
-
 import cv2
 import numpy as np
 import time
@@ -484,7 +477,7 @@ def main():
             # — Brush preview —
             brush_cx = sep1_x + 30
             brush_cy = bar_y + 26
-            bvr = max(3, canvas_led.brush_size * 5)
+            bvr = min(max(3, canvas_led.brush_size * 4), 18)
             cv2.circle(frame_preview, (brush_cx, brush_cy), bvr + 3, (50, 50, 65), -1, cv2.LINE_AA)
             cv2.circle(frame_preview, (brush_cx, brush_cy), bvr,     (200, 200, 210), -1, cv2.LINE_AA)
             b_label = f"B{canvas_led.brush_size}"
@@ -525,26 +518,8 @@ def main():
                                pill_x + pill_w // 2, pill_cy_center,
                                _F, 0.46, (255, 255, 255))
 
-            # — Undo badge (pill piccola) —
-            undo_n = len(_undo_stack)
-            next_badge_x = pill_x + pill_w + 12
-            if undo_n > 0:
-                u_label = f"Z:{undo_n}"
-                (uw, uh), _ = cv2.getTextSize(u_label, _F, 0.36, 1)
-                ux1 = next_badge_x
-                ux2 = ux1 + uw + 16
-                uy1 = pill_cy_center - uh // 2 - 5
-                uy2 = pill_cy_center + uh // 2 + 5
-                _rounded_rect(frame_preview, (ux1, uy1), (ux2, uy2),
-                              (55, 55, 75), radius=(uy2 - uy1) // 2)
-                _rounded_rect(frame_preview, (ux1, uy1), (ux2, uy2),
-                              (90, 90, 110), radius=(uy2 - uy1) // 2, filled=False)
-                _put_text_centered(frame_preview, u_label,
-                                   (ux1 + ux2) // 2, pill_cy_center,
-                                   _F, 0.36, (160, 160, 180))
-                next_badge_x = ux2 + 8
-
             # — Smoothing badge —
+            next_badge_x = pill_x + pill_w + 12
             sm_label = "~ON" if tracker.smoothing_enabled else "~OFF"
             sm_col_bg = (40, 70, 40) if tracker.smoothing_enabled else (70, 40, 40)
             sm_col_fg = (120, 220, 120) if tracker.smoothing_enabled else (220, 120, 120)
@@ -571,7 +546,7 @@ def main():
                     blended = (_wm_img * _wm_alpha + roi * (1.0 - _wm_alpha)).astype(np.uint8)
                     frame_preview[wm_y:wm_y + _wm_h, wm_x:wm_x + _wm_w] = blended
 
-            cv2.imshow('FLED CAM v1.1.3', frame_preview)
+            cv2.imshow('FLED CAM v1.1.5', frame_preview)
 
             # -- Tastiera --
             key = cv2.waitKey(16) & 0xFF

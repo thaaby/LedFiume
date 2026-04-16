@@ -445,17 +445,23 @@ class HandTracker:
             cv2.circle(frame, pt, r, c, -1, cv2.LINE_AA)
 
         # Evidenzia le punte rilevanti in base al gesto
+        def _clamped(pt, margin):
+            return (max(margin, min(w - margin, pt[0])),
+                    max(margin, min(h - margin, pt[1])))
+
         if hand_state.drawing:
             # Pollice (4) e indice (8): pallino medio + ring bianco + linea
             cv2.line(frame, pts[4], pts[8], (0, 220, 0), 1, cv2.LINE_AA)
             for tip_i in (4, 8):
-                cv2.circle(frame, pts[tip_i], 6, (0, 200, 0),   -1, cv2.LINE_AA)
-                cv2.circle(frame, pts[tip_i], 8, (255, 255, 255), 1, cv2.LINE_AA)
+                p = _clamped(pts[tip_i], 9)
+                cv2.circle(frame, p, 6, (0, 200, 0),   -1, cv2.LINE_AA)
+                cv2.circle(frame, p, 8, (255, 255, 255), 1, cv2.LINE_AA)
         elif hand_state.precision_erasing:
             # Solo indice (8): pallino medio blu + ring
-            cv2.circle(frame, pts[8],  7, (60, 60, 200),   -1, cv2.LINE_AA)
-            cv2.circle(frame, pts[8],  9, (255, 255, 255),   1, cv2.LINE_AA)
-            cv2.circle(frame, pts[8], 11, (120, 120, 255),   1, cv2.LINE_AA)
+            p = _clamped(pts[8], 12)
+            cv2.circle(frame, p,  7, (60, 60, 200),   -1, cv2.LINE_AA)
+            cv2.circle(frame, p,  9, (255, 255, 255),   1, cv2.LINE_AA)
+            cv2.circle(frame, p, 11, (120, 120, 255),   1, cv2.LINE_AA)
 
         if hand_state.gesture_label:
             wx, wy = pts[0]
@@ -475,13 +481,17 @@ class HandTracker:
             cx = int(hand_state.raw_x * w)
             cy = int(hand_state.raw_y * h)
 
+        # Clamp cursore dentro il frame
+        margin_cross = 14
+        cx = max(margin_cross, min(w - margin_cross, cx))
+        cy = max(margin_cross, min(h - margin_cross, cy))
+
         if hand_state.drawing:
             col = (0, 255, 0)
             s = 8
             cv2.line(frame, (cx - s, cy), (cx + s, cy), col, 2, cv2.LINE_AA)
             cv2.line(frame, (cx, cy - s), (cx, cy + s), col, 2, cv2.LINE_AA)
         elif hand_state.precision_erasing:
-            # Cerchio gomma invece del crosshair
             cv2.circle(frame, (cx, cy), 12, (80, 80, 255), 1, cv2.LINE_AA)
             cv2.line(frame, (cx - 4, cy), (cx + 4, cy), (80, 80, 255), 1, cv2.LINE_AA)
             cv2.line(frame, (cx, cy - 4), (cx, cy + 4), (80, 80, 255), 1, cv2.LINE_AA)
