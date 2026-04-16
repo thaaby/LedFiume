@@ -24,10 +24,10 @@ PINCH_STOP_RATIO        = 0.28    # isteresi per evitare flickering
 
 # ── Gesti (frame per attivazione) ────────────────────────────
 PEACE_ACTIVATE_FRAMES   = 2       # via di mezzo
-PEACE_COOLDOWN_SEC      = 0.5     # secondi di cooldown dopo cambio colore
+PEACE_COOLDOWN_SEC      = 1.5     # secondi di cooldown dopo cambio colore
 ERASER_ACTIVATE_FRAMES  = 6
 THUMBS_DOWN_ACTIVATE_FRAMES = 2
-PEACE_POST_DRAW_GRACE   = 10
+PEACE_POST_DRAW_GRACE   = 4
 
 # ── 1-Euro Filter (anti-tremore adattivo) ────────────────────
 # min_cutoff basso = piu liscio a bassa velocita (filtra tremore)
@@ -152,10 +152,16 @@ class HandTracker:
         self.canvas_width = canvas_width
         self.canvas_height = canvas_height
         self.num_hands = num_hands
+        self.smoothing_enabled = True
         self._hand_data = {}
         self._detector = None
         self._last_ts = 0
         self._create_detector()
+
+    def toggle_smoothing(self):
+        self.smoothing_enabled = not self.smoothing_enabled
+        state = "ON" if self.smoothing_enabled else "OFF"
+        print(f"[FILTRO] Smoothing {state}")
 
     def _create_detector(self):
         if self._detector is not None:
@@ -246,8 +252,12 @@ class HandTracker:
                 hd.filter_x.set_min_cutoff(mc)
                 hd.filter_y.set_min_cutoff(mc)
 
-                state.raw_x = hd.filter_x(raw_x, now)
-                state.raw_y = hd.filter_y(raw_y, now)
+                if self.smoothing_enabled:
+                    state.raw_x = hd.filter_x(raw_x, now)
+                    state.raw_y = hd.filter_y(raw_y, now)
+                else:
+                    state.raw_x = raw_x
+                    state.raw_y = raw_y
 
                 # ── Stabilizzazione ──────────────────────────
                 if hd.stabilize_frames > 0:
@@ -284,9 +294,10 @@ class HandTracker:
                 # ── Dita estese ──────────────────────────────
                 fingers_up = self._count_fingers(landmarks, label)
 
-                # ── Peace/V (con soglie differenziate) ───────
-                is_peace_raw = (self._is_peace_gesture(landmarks)
-                                and not is_pinching)
+                # ── Peace/V: indice e medio su, anulare e mignolo giu ───
+                is_peace_raw = (fingers_up[1] and fingers_up[2] and
+                                not fingers_up[3] and not fingers_up[4] and
+                                not is_pinching)
 
                 # ── Thumbs down ──────────────────────────────
                 is_thumbs_raw = (self._is_thumbs_down(landmarks, fingers_up)
@@ -386,26 +397,6 @@ class HandTracker:
         cos_angle = max(-1.0, min(1.0, dot / (mag_a * mag_b)))
         return math.degrees(math.acos(cos_angle))
 
-    def _is_peace_gesture(self, landmarks):
-        """Peace/V basato sull'ANGOLO DI PIEGATURA delle dita.
-        Dito dritto ~160-180, dito piegato ~60-100.
-        Indipendente dall'orientamento della mano."""
-        # Angoli al PIP: MCP -> PIP -> TIP
-        index_angle  = self._finger_angle(landmarks, 5, 6, 8)
-        middle_angle = self._finger_angle(landmarks, 9, 10, 12)
-        ring_angle   = self._finger_angle(landmarks, 13, 14, 16)
-        pinky_angle  = self._finger_angle(landmarks, 17, 18, 20)
-
-        # Indice e medio devono essere DRITTI (angolo > 130)
-        index_straight  = index_angle > 130
-        middle_straight = middle_angle > 130
-
-        # Anulare e mignolo devono essere PIEGATI (angolo < 135)
-        ring_bent  = ring_angle < 135
-        pinky_bent = pinky_angle < 135
-
-        return index_straight and middle_straight and ring_bent and pinky_bent
-
     def _is_thumbs_down(self, landmarks, fingers_up):
         """Pollice giu: pollice punta in basso, tutte le altre dita piegate."""
         thumb_tip = landmarks[4]
@@ -453,6 +444,19 @@ class HandTracker:
             c = tip_col if i in FINGERTIP_IDS else joint_col
             cv2.circle(frame, pt, r, c, -1, cv2.LINE_AA)
 
+        # Evidenzia le punte rilevanti in base al gesto
+        if hand_state.drawing:
+            # Pollice (4) e indice (8): pallino medio + ring bianco + linea
+            cv2.line(frame, pts[4], pts[8], (0, 220, 0), 1, cv2.LINE_AA)
+            for tip_i in (4, 8):
+                cv2.circle(frame, pts[tip_i], 6, (0, 200, 0),   -1, cv2.LINE_AA)
+                cv2.circle(frame, pts[tip_i], 8, (255, 255, 255), 1, cv2.LINE_AA)
+        elif hand_state.precision_erasing:
+            # Solo indice (8): pallino medio blu + ring
+            cv2.circle(frame, pts[8],  7, (60, 60, 200),   -1, cv2.LINE_AA)
+            cv2.circle(frame, pts[8],  9, (255, 255, 255),   1, cv2.LINE_AA)
+            cv2.circle(frame, pts[8], 11, (120, 120, 255),   1, cv2.LINE_AA)
+
         if hand_state.gesture_label:
             wx, wy = pts[0]
             cv2.putText(frame, hand_state.gesture_label,
@@ -462,16 +466,27 @@ class HandTracker:
 
     def _draw_crosshair(self, frame, hand_state):
         h, w = frame.shape[:2]
-        cx = int(hand_state.raw_x * w)
-        cy = int(hand_state.raw_y * h)
+
+        if hand_state.precision_erasing and hand_state.landmarks:
+            # Cursore eraser sulla punta dell'indice (landmark 8)
+            cx = int(hand_state.landmarks[8][0] * w)
+            cy = int(hand_state.landmarks[8][1] * h)
+        else:
+            cx = int(hand_state.raw_x * w)
+            cy = int(hand_state.raw_y * h)
 
         if hand_state.drawing:
             col = (0, 255, 0)
+            s = 8
+            cv2.line(frame, (cx - s, cy), (cx + s, cy), col, 2, cv2.LINE_AA)
+            cv2.line(frame, (cx, cy - s), (cx, cy + s), col, 2, cv2.LINE_AA)
         elif hand_state.precision_erasing:
-            col = (0, 0, 255)
+            # Cerchio gomma invece del crosshair
+            cv2.circle(frame, (cx, cy), 12, (80, 80, 255), 1, cv2.LINE_AA)
+            cv2.line(frame, (cx - 4, cy), (cx + 4, cy), (80, 80, 255), 1, cv2.LINE_AA)
+            cv2.line(frame, (cx, cy - 4), (cx, cy + 4), (80, 80, 255), 1, cv2.LINE_AA)
         else:
             col = (180, 180, 180)
-
-        s = 5
-        cv2.line(frame, (cx - s, cy), (cx + s, cy), col, 1, cv2.LINE_AA)
-        cv2.line(frame, (cx, cy - s), (cx, cy + s), col, 1, cv2.LINE_AA)
+            s = 5
+            cv2.line(frame, (cx - s, cy), (cx + s, cy), col, 1, cv2.LINE_AA)
+            cv2.line(frame, (cx, cy - s), (cx, cy + s), col, 1, cv2.LINE_AA)

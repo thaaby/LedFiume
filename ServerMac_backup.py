@@ -169,42 +169,6 @@ def save_and_send(canvas_led):
 
 
 # ============================================================
-# GUI HELPERS
-# ============================================================
-def _rounded_rect(img, pt1, pt2, color, radius, filled=True, thickness=1):
-    """Rettangolo con angoli arrotondati (filled o outline)."""
-    x1, y1 = pt1
-    x2, y2 = pt2
-    r = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
-    if r <= 0:
-        if filled:
-            cv2.rectangle(img, pt1, pt2, color, -1)
-        else:
-            cv2.rectangle(img, pt1, pt2, color, thickness)
-        return
-    t = -1 if filled else thickness
-    if filled:
-        cv2.rectangle(img, (x1 + r, y1), (x2 - r, y2), color, -1)
-        cv2.rectangle(img, (x1, y1 + r), (x2, y2 - r), color, -1)
-    else:
-        cv2.line(img, (x1 + r, y1), (x2 - r, y1), color, thickness, cv2.LINE_AA)
-        cv2.line(img, (x1 + r, y2), (x2 - r, y2), color, thickness, cv2.LINE_AA)
-        cv2.line(img, (x1, y1 + r), (x1, y2 - r), color, thickness, cv2.LINE_AA)
-        cv2.line(img, (x2, y1 + r), (x2, y2 - r), color, thickness, cv2.LINE_AA)
-    cv2.ellipse(img, (x1 + r, y1 + r), (r, r), 180,  0, 90, color, t, cv2.LINE_AA)
-    cv2.ellipse(img, (x2 - r, y1 + r), (r, r), 270,  0, 90, color, t, cv2.LINE_AA)
-    cv2.ellipse(img, (x1 + r, y2 - r), (r, r),  90,  0, 90, color, t, cv2.LINE_AA)
-    cv2.ellipse(img, (x2 - r, y2 - r), (r, r),   0,  0, 90, color, t, cv2.LINE_AA)
-
-
-def _put_text_centered(img, text, cx, cy, font, scale, color, thickness=1):
-    """Testo centrato orizzontalmente e verticalmente su (cx, cy)."""
-    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
-    cv2.putText(img, text, (cx - tw // 2, cy + th // 2),
-                font, scale, color, thickness, cv2.LINE_AA)
-
-
-# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -311,18 +275,15 @@ def main():
             if not is_any_drawing:
                 synth.play_note(0, 0, canvas_led.width, canvas_led.height, False)
 
-            is_any_erasing = any(s.precision_erasing for s in hand_states)
-
             for hand_state in hand_states:
-                if (hand_state.thumbs_down and not is_any_drawing
-                        and (time.time() - last_erase_time > ERASE_COOLDOWN)):
+                if hand_state.thumbs_down and not is_any_drawing and (time.time() - last_erase_time > ERASE_COOLDOWN):
                     push_undo(canvas_led)
                     canvas_led.clear()
                     last_erase_time = time.time()
                     print("[CANCELLA] Lavagna cancellata!")
 
             for hand_state in hand_states:
-                if hand_state.peace_sign and not is_any_erasing:
+                if hand_state.peace_sign:
                     current_idx = canvas_led.get_color_index()
                     next_idx = (current_idx + 1) % len(COLOR_PALETTE)
                     canvas_led.set_color_by_index(next_idx)
@@ -354,26 +315,13 @@ def main():
                     synth.play_note(gx, gy,
                                    canvas_led.width, canvas_led.height, True)
                     was_drawing_prev[hid] = True
-                elif hand_state.precision_erasing:
-                    # Usa la punta dell'indice (landmark 8) invece del midpoint pollice-indice
-                    if hand_state.landmarks is not None:
-                        ex = int(hand_state.landmarks[8][0] * fw)
-                        ey = int(hand_state.landmarks[8][1] * fh)
-                        egx = (ex - ox) // cell if cell > 0 else -1
-                        egy = (ey - oy) // cell if cell > 0 else -1
-                    else:
-                        egx, egy = gx, gy
-                    in_grid_erase = 0 <= egx < CANVAS_W and 0 <= egy < CANVAS_H
-                    if in_grid_erase:
-                        if not was_drawing_prev.get(hid, False):
-                            push_undo(canvas_led)
-                        canvas_led.draw_at(egx, egy,
-                                           True, hand_id=hid,
-                                           is_erasing=True)
-                        was_drawing_prev[hid] = True
-                    else:
-                        canvas_led.draw_at(0, 0, False, hand_id=hid)
-                        was_drawing_prev[hid] = False
+                elif hand_state.precision_erasing and in_grid:
+                    if not was_drawing_prev.get(hid, False):
+                        push_undo(canvas_led)
+                    canvas_led.draw_at(gx, gy,
+                                       True, hand_id=hid,
+                                       is_erasing=True)
+                    was_drawing_prev[hid] = True
                 else:
                     canvas_led.draw_at(gx, gy,
                                        False, hand_id=hid,
@@ -383,7 +331,7 @@ def main():
             # -- GUI: griglia LED sovrapposta alla webcam --
             frame_preview = frame.copy()
 
-            # 1) Pixel colorati (opacita 70%) — invariato
+            # 1) Pixel colorati (opacita 70%)
             rgb = canvas_led.get_frame_rgb()
             overlay = frame_preview.copy()
             for gy_i in range(CANVAS_H):
@@ -396,7 +344,7 @@ def main():
                                       (px1 + cell, py1 + cell), (b, g, r), -1)
             cv2.addWeighted(overlay, 0.7, frame_preview, 0.3, 0, frame_preview)
 
-            # 2) Griglia (sottile, anti-aliased) — invariato
+            # 2) Griglia (sottile, anti-aliased)
             grid_color = (60, 60, 60)
             for gx_i in range(CANVAS_W + 1):
                 x = ox + gx_i * cell
@@ -404,174 +352,63 @@ def main():
             for gy_i in range(CANVAS_H + 1):
                 y = oy + gy_i * cell
                 cv2.line(frame_preview, (ox, y), (ox + grid_w, y), grid_color, 1, cv2.LINE_AA)
-            # Bordo griglia con glow (doppio anello)
-            cv2.rectangle(frame_preview, (ox - 4, oy - 4),
-                          (ox + grid_w + 4, oy + grid_h + 4), (0, 100, 80), 3, cv2.LINE_AA)
-            cv2.rectangle(frame_preview, (ox - 2, oy - 2),
-                          (ox + grid_w + 2, oy + grid_h + 2), (0, 225, 175), 2, cv2.LINE_AA)
+            # Bordo griglia
+            cv2.rectangle(frame_preview, (ox, oy), (ox + grid_w, oy + grid_h),
+                          (110, 110, 110), 2, cv2.LINE_AA)
 
-            # 3) Scheletro mano + mirino — invariato
+            # 3) Scheletro mano + mirino (sopra la griglia)
             for hand_state in hand_states:
                 tracker.draw_overlay(frame_preview, hand_state)
 
-            # ── Costanti GUI ──────────────────────────────────────
-            _F = cv2.FONT_HERSHEY_SIMPLEX
-            _FD = cv2.FONT_HERSHEY_DUPLEX
-            TEAL   = (0, 225, 175)
-            TEAL_D = (0, 100, 80)
-            BG     = (22, 18, 32)       # viola scuro per i pannelli
-
-            # ── TOP BAR ──────────────────────────────────────────
-            top_h = 44
-            _bg = frame_preview.copy()
-            cv2.rectangle(_bg, (0, 0), (fw, top_h), BG, -1)
-            cv2.addWeighted(_bg, 0.88, frame_preview, 0.12, 0, frame_preview)
-            cv2.line(frame_preview, (0, top_h - 1), (fw, top_h - 1), TEAL, 2)
-
-            # Logo "FLED CAM" (sinistra)
-            cv2.putText(frame_preview, "FLED", (7, 30), _FD, 0.9,
-                        TEAL, 2, cv2.LINE_AA)
-            cv2.putText(frame_preview, "CAM",  (80, 30), _FD, 0.9,
-                        (220, 220, 220), 1, cv2.LINE_AA)
-
-            # Hint centrato nello spazio rimanente
-            hint = "Pinch=disegna   V=colore   +/-=pennello   F=fill   Z=undo   S=salva"
-            (hw, _), _ = cv2.getTextSize(hint, _F, 0.32, 1)
-            hint_x = 136 + (fw - 136 - hw) // 2
-            cv2.putText(frame_preview, hint, (hint_x, 28), _F, 0.32,
-                        (255, 255, 255), 1, cv2.LINE_AA)
-
-            # ── BOTTOM BAR ───────────────────────────────────────
-            bar_h = 72
+            # 4) Barra info in basso (semi-trasparente)
+            bar_h = 38
             bar_y = fh - bar_h
-            _bg2 = frame_preview.copy()
-            cv2.rectangle(_bg2, (0, bar_y), (fw, fh), BG, -1)
-            cv2.addWeighted(_bg2, 0.90, frame_preview, 0.10, 0, frame_preview)
-            cv2.line(frame_preview, (0, bar_y), (fw, bar_y), TEAL, 2)
+            bar_overlay = frame_preview.copy()
+            cv2.rectangle(bar_overlay, (0, bar_y), (fw, fh), (25, 25, 25), -1)
+            cv2.addWeighted(bar_overlay, 0.82, frame_preview, 0.18, 0, frame_preview)
 
-            # — Palette colori —
-            pal_step = 42
-            pal_x    = 24
-            pal_cy   = bar_y + 26
-            active_ci = canvas_led.get_color_index()
-
+            # Palette colori (cerchi)
+            pal_x = 14
             for ci, col in enumerate(COLOR_PALETTE):
-                cx_c  = pal_x + ci * pal_step
+                cx_c = pal_x + ci * 26
+                cy_c = bar_y + bar_h // 2
                 bgr_c = (int(col[2]), int(col[1]), int(col[0]))
-                is_active = (ci == active_ci)
-                r_c = 15 if is_active else 11
-                # Alone esterno per attivo
-                if is_active:
-                    cv2.circle(frame_preview, (cx_c, pal_cy), r_c + 6, TEAL_D, -1, cv2.LINE_AA)
-                    cv2.circle(frame_preview, (cx_c, pal_cy), r_c + 4, TEAL,   2,  cv2.LINE_AA)
+                # Cerchio nero visibile con bordo
+                if col == (0, 0, 0):
+                    cv2.circle(frame_preview, (cx_c, cy_c), 8, (50, 50, 50), -1, cv2.LINE_AA)
                 else:
-                    cv2.circle(frame_preview, (cx_c, pal_cy), r_c + 2, (50, 50, 65), 1, cv2.LINE_AA)
-                # Cerchio colore
-                draw_col = (62, 62, 72) if col == (0, 0, 0) else bgr_c
-                cv2.circle(frame_preview, (cx_c, pal_cy), r_c, draw_col, -1, cv2.LINE_AA)
+                    cv2.circle(frame_preview, (cx_c, cy_c), 8, bgr_c, -1, cv2.LINE_AA)
+                # Evidenzia colore attivo
+                if ci == canvas_led.get_color_index():
+                    cv2.circle(frame_preview, (cx_c, cy_c), 11, (255, 255, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.circle(frame_preview, (cx_c, cy_c), 9, (70, 70, 70), 1, cv2.LINE_AA)
 
-            # Nome colore attivo centrato sotto il suo cerchio
-            c_name = canvas_led.get_color_name().upper()
-            (cnw, _), _ = cv2.getTextSize(c_name, _F, 0.28, 1)
-            cv2.putText(frame_preview, c_name,
-                        (pal_x + active_ci * pal_step - cnw // 2, bar_y + bar_h - 8),
-                        _F, 0.28, (190, 190, 200), 1, cv2.LINE_AA)
-
-            # Separatore
-            sep1_x = pal_x + len(COLOR_PALETTE) * pal_step + 6
-            cv2.line(frame_preview, (sep1_x, bar_y + 10), (sep1_x, fh - 10), (55, 55, 70), 1)
-
-            # — Brush preview —
-            brush_cx = sep1_x + 30
-            brush_cy = bar_y + 26
-            bvr = max(3, canvas_led.brush_size * 5)
-            cv2.circle(frame_preview, (brush_cx, brush_cy), bvr + 3, (50, 50, 65), -1, cv2.LINE_AA)
-            cv2.circle(frame_preview, (brush_cx, brush_cy), bvr,     (200, 200, 210), -1, cv2.LINE_AA)
-            b_label = f"B{canvas_led.brush_size}"
-            (blw, _), _ = cv2.getTextSize(b_label, _F, 0.28, 1)
-            cv2.putText(frame_preview, b_label,
-                        (brush_cx - blw // 2, bar_y + bar_h - 8),
-                        _F, 0.28, (150, 150, 165), 1, cv2.LINE_AA)
-
-            # Separatore
-            sep2_x = brush_cx + 36
-            cv2.line(frame_preview, (sep2_x, bar_y + 10), (sep2_x, fh - 10), (55, 55, 70), 1)
-
-            # — Pill modalità (arrotondata, testo centrato) —
-            mode_label = "FILL" if fill_mode else "DRAW"
-            pill_col   = (30, 175, 65)  if fill_mode else (200, 90, 20)
-            pill_glow  = (20, 120, 45)  if fill_mode else (140, 60, 12)
-            (tw, th), _ = cv2.getTextSize(mode_label, _F, 0.46, 1)
-            pill_w  = tw + 28
-            pill_h  = th + 16
-            pill_x  = sep2_x + 16
-            pill_cy_center = bar_y + bar_h // 2 - 4
-            pill_y1 = pill_cy_center - pill_h // 2
-            pill_y2 = pill_y1 + pill_h
-            # Alone
-            _rounded_rect(frame_preview, (pill_x - 2, pill_y1 - 2),
-                          (pill_x + pill_w + 2, pill_y2 + 2), pill_glow,
-                          radius=(pill_h + 4) // 2)
-            # Corpo pill
-            _rounded_rect(frame_preview, (pill_x, pill_y1),
-                          (pill_x + pill_w, pill_y2), pill_col,
-                          radius=pill_h // 2)
-            # Bordo bianco
-            _rounded_rect(frame_preview, (pill_x, pill_y1),
-                          (pill_x + pill_w, pill_y2), (255, 255, 255),
-                          radius=pill_h // 2, filled=False)
-            # Testo centrato nella pill
-            _put_text_centered(frame_preview, mode_label,
-                               pill_x + pill_w // 2, pill_cy_center,
-                               _F, 0.46, (255, 255, 255))
-
-            # — Undo badge (pill piccola) —
+            # Testo info
+            txt_x = pal_x + len(COLOR_PALETTE) * 26 + 12
+            parts = [f"Pen:{canvas_led.brush_size}", f"Mani:{tracker.num_hands}"]
+            if fill_mode:
+                parts.append("FILL")
             undo_n = len(_undo_stack)
-            next_badge_x = pill_x + pill_w + 12
             if undo_n > 0:
-                u_label = f"Z:{undo_n}"
-                (uw, uh), _ = cv2.getTextSize(u_label, _F, 0.36, 1)
-                ux1 = next_badge_x
-                ux2 = ux1 + uw + 16
-                uy1 = pill_cy_center - uh // 2 - 5
-                uy2 = pill_cy_center + uh // 2 + 5
-                _rounded_rect(frame_preview, (ux1, uy1), (ux2, uy2),
-                              (55, 55, 75), radius=(uy2 - uy1) // 2)
-                _rounded_rect(frame_preview, (ux1, uy1), (ux2, uy2),
-                              (90, 90, 110), radius=(uy2 - uy1) // 2, filled=False)
-                _put_text_centered(frame_preview, u_label,
-                                   (ux1 + ux2) // 2, pill_cy_center,
-                                   _F, 0.36, (160, 160, 180))
-                next_badge_x = ux2 + 8
+                parts.append(f"Undo:{undo_n}")
+            info_str = "  ".join(parts)
+            cv2.putText(frame_preview, info_str,
+                        (txt_x, bar_y + bar_h // 2 + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                        (190, 190, 190), 1, cv2.LINE_AA)
 
-            # — Smoothing badge —
-            sm_label = "~ON" if tracker.smoothing_enabled else "~OFF"
-            sm_col_bg = (40, 70, 40) if tracker.smoothing_enabled else (70, 40, 40)
-            sm_col_fg = (120, 220, 120) if tracker.smoothing_enabled else (220, 120, 120)
-            (sw, sh), _ = cv2.getTextSize(sm_label, _F, 0.32, 1)
-            sx1 = next_badge_x
-            sx2 = sx1 + sw + 14
-            sy1 = pill_cy_center - sh // 2 - 5
-            sy2 = pill_cy_center + sh // 2 + 5
-            _rounded_rect(frame_preview, (sx1, sy1), (sx2, sy2),
-                          sm_col_bg, radius=(sy2 - sy1) // 2)
-            _rounded_rect(frame_preview, (sx1, sy1), (sx2, sy2),
-                          sm_col_fg, radius=(sy2 - sy1) // 2, filled=False)
-            _put_text_centered(frame_preview, sm_label,
-                               (sx1 + sx2) // 2, pill_cy_center,
-                               _F, 0.32, sm_col_fg)
-
-            # — Watermark centrato verticalmente nella barra —
+            # 5) Watermark in basso a destra (centrato verticalmente sopra il bordo inferiore)
             if _wm_img is not None:
-                wm_x = fw - _wm_w - 12
-                wm_y = bar_y + (bar_h - _wm_h) // 2
-                wm_y = max(0, min(wm_y, fh - _wm_h))
+                wm_x = fw - _wm_w - 10
+                wm_y = fh - _wm_h - 5  # 5px dal bordo, sovrapposto alla barra
+                wm_y = max(0, wm_y)
                 roi = frame_preview[wm_y:wm_y + _wm_h, wm_x:wm_x + _wm_w]
                 if roi.shape[:2] == (_wm_h, _wm_w):
                     blended = (_wm_img * _wm_alpha + roi * (1.0 - _wm_alpha)).astype(np.uint8)
                     frame_preview[wm_y:wm_y + _wm_h, wm_x:wm_x + _wm_w] = blended
 
-            cv2.imshow('FLED CAM v1.1.3', frame_preview)
+            cv2.imshow('FLED CAM v1.0.9', frame_preview)
 
             # -- Tastiera --
             key = cv2.waitKey(16) & 0xFF
@@ -616,8 +453,6 @@ def main():
             elif key == ord('n'):
                 canvas_led.set_color_by_index(4)
                 print(f"[COLORE] {canvas_led.get_color_name()}")
-            elif key == ord('t'):
-                tracker.toggle_smoothing()
 
     except KeyboardInterrupt:
         print("\n[BYE] Chiusura...")
